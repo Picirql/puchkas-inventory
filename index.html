@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Puchkas Inventory Management</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Login Screen -->
+  <main id="login-screen" class="login-screen">
+    <header class="login-header">
+      <h1>Puchkas Inventory Management</h1>
+      <p class="login-subtitle">Select your role to sign in</p>
+    </header>
+
+    <!-- Role Selection Grid -->
+    <section id="role-grid" class="role-grid">
+      <button class="role-card" data-role="manager">
+        <span class="role-avatar">M</span>
+        <span class="role-name">Manager</span>
+      </button>
+
+      <button class="role-card" data-role="warehouse">
+        <span class="role-avatar">W</span>
+        <span class="role-name">Warehouse</span>
+      </button>
+
+      <button class="role-card" data-role="shop1">
+        <span class="role-avatar">S1</span>
+        <span class="role-name">Shop 1</span>
+      </button>
+
+      <button class="role-card" data-role="shop2">
+        <span class="role-avatar">S2</span>
+        <span class="role-name">Shop 2</span>
+      </button>
+
+      <button class="role-card" data-role="shop3">
+        <span class="role-avatar">S3</span>
+        <span class="role-name">Shop 3</span>
+      </button>
+
+      <button class="role-card" data-role="kitchen">
+        <span class="role-avatar">K</span>
+        <span class="role-name">Kitchen</span>
+      </button>
+    </section>
+
+    <!-- PIN Keypad Overlay -->
+    <div id="pin-overlay" class="pin-overlay" hidden>
+      <div class="pin-modal">
+        <p class="pin-role-label">Enter PIN for <span id="pin-role-name">Role</span></p>
+
+        <div class="pin-display" id="pin-display">
+          <span class="pin-dot" data-index="0"></span>
+          <span class="pin-dot" data-index="1"></span>
+          <span class="pin-dot" data-index="2"></span>
+          <span class="pin-dot" data-index="3"></span>
+        </div>
+
+        <p id="pin-error" class="pin-error" hidden>Incorrect PIN. Try again.</p>
+
+        <div class="pin-keypad">
+          <button class="key" data-key="1">1</button>
+          <button class="key" data-key="2">2</button>
+          <button class="key" data-key="3">3</button>
+          <button class="key" data-key="4">4</button>
+          <button class="key" data-key="5">5</button>
+          <button class="key" data-key="6">6</button>
+          <button class="key" data-key="7">7</button>
+          <button class="key" data-key="8">8</button>
+          <button class="key" data-key="9">9</button>
+          <button class="key key-action" data-key="clear">Clear</button>
+          <button class="key" data-key="0">0</button>
+          <button class="key key-action" data-key="backspace">⌫</button>
+        </div>
+
+        <button id="pin-cancel-btn" class="pin-cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- App Shell (hidden until login succeeds) -->
+  <div id="app-shell" class="app-shell" style="display: none;">
+
+    <!-- Backdrop shown behind the drawer on mobile -->
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+
+    <!-- Left Sidebar / Navigation Rail -->
+    <nav id="sidebar" class="sidebar">
+      <div class="sidebar-brand">Puchkas<span>IM</span></div>
+
+      <ul class="nav-rail">
+        <li><button class="nav-btn" data-view="items">Items</button></li>
+        <li><button class="nav-btn" data-view="warehouse">Warehouse</button></li>
+        <li><button class="nav-btn" data-view="shop1">Shop 1</button></li>
+        <li><button class="nav-btn" data-view="shop2">Shop 2</button></li>
+        <li><button class="nav-btn" data-view="shop3">Shop 3</button></li>
+        <li><button class="nav-btn" data-view="kitchen">Kitchen</button></li>
+      </ul>
+
+      <div class="user-profile-card">
+        <span class="user-role-label" id="logged-in-role">Role</span>
+        <button id="logout-btn" class="logout-btn">Logout</button>
+      </div>
+    </nav>
+
+    <!-- Main Content Panel -->
+    <main class="main-content">
+      <button id="hamburger-btn" class="hamburger-btn" aria-label="Toggle navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+
+      <div id="view-content" class="view-content">
+        <p>Welcome to the dashboard view</p>
+      </div>
+
+      <!-- Warehouse View: Subtab Navigation + Content -->
+      <div id="warehouse-view" class="warehouse-view" hidden>
+        <nav class="subtab-bar">
+          <button class="warehouse-subtab-btn active" data-subtab="general">General Inventory</button>
+          <button class="warehouse-subtab-btn" data-subtab="kitchen">Kitchen</button>
+          <button class="warehouse-subtab-btn" data-subtab="shop1">Shop 1</button>
+          <button class="warehouse-subtab-btn" data-subtab="shop2">Shop 2</button>
+          <button class="warehouse-subtab-btn" data-subtab="shop3">Shop 3</button>
+        </nav>
+
+        <div id="warehouse-subtab-content" class="warehouse-subtab-content">
+          <!-- Populated dynamically based on the active subtab -->
+        </div>
+      </div>
+    </main>
+
+  </div>
+
+  <!-- Remove-Item Confirmation Dialog -->
+  <div id="confirm-overlay" class="pin-overlay" hidden>
+    <div class="pin-modal confirm-modal">
+      <p class="confirm-message" id="confirm-message">Remove this item?</p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="confirm-remove-btn" class="confirm-remove-btn">Remove</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stock Update Modal -->
+  <div id="stock-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Update Stock</h3>
+
+      <div class="stock-field">
+        <label for="stock-item-search" class="stock-field-label">Item</label>
+        <input type="text" id="stock-item-search" class="stock-item-search" placeholder="Search for an item..." autocomplete="off" />
+        <ul id="stock-item-suggestions" class="stock-item-suggestions" hidden></ul>
+      </div>
+
+      <div class="stock-field">
+        <label for="stock-action-select" class="stock-field-label">Action</label>
+        <select id="stock-action-select" class="stock-action-select">
+          <option value="add">Add (Buy / Restock)</option>
+          <option value="subtract">Subtract (Sell / Use)</option>
+        </select>
+      </div>
+
+      <div class="stock-field">
+        <label for="stock-quantity-input" class="stock-field-label">Quantity</label>
+        <input type="number" id="stock-quantity-input" class="stock-quantity-input" min="1" step="1" placeholder="0" />
+      </div>
+
+      <p id="stock-modal-error" class="stock-modal-error" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="stock-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="stock-save-btn" class="stock-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Item Modal -->
+  <div id="edit-item-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Edit Item Name</h3>
+
+      <div class="stock-field">
+        <label for="edit-item-input" class="stock-field-label">Item Name</label>
+        <input type="text" id="edit-item-input" class="stock-item-search" placeholder="Item name" autocomplete="off" />
+      </div>
+
+      <p id="edit-item-error" class="stock-modal-error" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="edit-item-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="edit-item-save-btn" class="stock-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Partial Dispatch Modal -->
+  <div id="partial-dispatch-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Not Enough Stock to Dispatch</h3>
+
+      <p class="partial-dispatch-info" id="partial-dispatch-info"></p>
+
+      <div class="stock-field">
+        <label for="partial-dispatch-qty-input" class="stock-field-label">Quantity to Send</label>
+        <input type="number" id="partial-dispatch-qty-input" class="stock-quantity-input" min="0" step="any" placeholder="0" />
+      </div>
+
+      <p id="partial-dispatch-error" class="stock-modal-error" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="partial-dispatch-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="partial-dispatch-send-btn" class="stock-save-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
