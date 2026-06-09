@@ -42,6 +42,11 @@
         <span class="role-name">Shop 3</span>
       </button>
 
+      <button class="role-card" data-role="shop4">
+        <span class="role-avatar">S4</span>
+        <span class="role-name">Shop 4</span>
+      </button>
+
       <button class="role-card" data-role="kitchen">
         <span class="role-avatar">K</span>
         <span class="role-name">Kitchen</span>
@@ -98,6 +103,7 @@
         <li><button class="nav-btn" data-view="shop1">Shop 1</button></li>
         <li><button class="nav-btn" data-view="shop2">Shop 2</button></li>
         <li><button class="nav-btn" data-view="shop3">Shop 3</button></li>
+        <li><button class="nav-btn" data-view="shop4">Shop 4</button></li>
         <li><button class="nav-btn" data-view="kitchen">Kitchen</button></li>
       </ul>
 
@@ -123,10 +129,12 @@
       <div id="warehouse-view" class="warehouse-view" hidden>
         <nav class="subtab-bar">
           <button class="warehouse-subtab-btn active" data-subtab="general">General Inventory</button>
+          <button class="warehouse-subtab-btn" data-subtab="requests">Requests</button>
           <button class="warehouse-subtab-btn" data-subtab="kitchen">Kitchen</button>
           <button class="warehouse-subtab-btn" data-subtab="shop1">Shop 1</button>
           <button class="warehouse-subtab-btn" data-subtab="shop2">Shop 2</button>
           <button class="warehouse-subtab-btn" data-subtab="shop3">Shop 3</button>
+          <button class="warehouse-subtab-btn" data-subtab="shop4">Shop 4</button>
         </nav>
 
         <div id="warehouse-subtab-content" class="warehouse-subtab-content">
@@ -170,6 +178,15 @@
       <div class="stock-field">
         <label for="stock-quantity-input" class="stock-field-label">Quantity</label>
         <input type="number" id="stock-quantity-input" class="stock-quantity-input" min="1" step="1" placeholder="0" />
+      </div>
+
+      <div class="stock-field" id="stock-source-field" hidden>
+        <label for="stock-source-select" class="stock-field-label">Source</label>
+        <select id="stock-source-select" class="stock-action-select">
+          <option value="" disabled selected>Select a source...</option>
+          <option value="online">Online</option>
+          <option value="supermarket">Supermarket</option>
+        </select>
       </div>
 
       <p id="stock-modal-error" class="stock-modal-error" hidden></p>
@@ -217,6 +234,27 @@
       <div class="confirm-actions">
         <button id="partial-dispatch-cancel-btn" class="pin-cancel-btn">Cancel</button>
         <button id="partial-dispatch-send-btn" class="stock-save-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Stock Update Source Modal -->
+  <div id="batch-source-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Update Stock</h3>
+      <p class="partial-dispatch-info">Select the source for this stock update.</p>
+      <div class="stock-field">
+        <label for="batch-source-select" class="stock-field-label">Source</label>
+        <select id="batch-source-select" class="stock-action-select">
+          <option value="" disabled selected>Select a source...</option>
+          <option value="online">Online</option>
+          <option value="supermarket">Supermarket</option>
+        </select>
+      </div>
+      <p id="batch-source-error" class="stock-modal-error" hidden></p>
+      <div class="confirm-actions">
+        <button id="batch-source-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="batch-source-confirm-btn" class="stock-save-btn">Update</button>
       </div>
     </div>
   </div>

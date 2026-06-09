@@ -6,6 +6,7 @@ const PINS = {
   shop1: '1111',
   shop2: '3333',
   shop3: '4444',
+  shop4: '6666',
   kitchen: '5555',
 };
 
@@ -15,11 +16,12 @@ const ROLE_LABELS = {
   shop1: 'Shop 1',
   shop2: 'Shop 2',
   shop3: 'Shop 3',
+  shop4: 'Shop 4',
   kitchen: 'Kitchen',
 };
 
-const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'kitchen'];
-const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3'];
+const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'kitchen'];
+const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
 
 const ROLE_ACCESS = {
   manager: ALL_VIEWS,
@@ -27,6 +29,7 @@ const ROLE_ACCESS = {
   shop1: ['shop1'],
   shop2: ['shop2'],
   shop3: ['shop3'],
+  shop4: ['shop4'],
   kitchen: ['kitchen'],
 };
 
@@ -45,6 +48,10 @@ let pendingRemoval = null;
 let pendingEdit = null;
 let pendingPartialDispatch = null;
 let currentViewKey = null;
+let pendingRequestItems = []; // [{ item, qty }] — cart built before submitting all at once
+let pendingRequestLocation = null; // location the cart belongs to; reset if user switches location
+let pendingKitchenRequestItems = []; // same cart pattern for Warehouse → Kitchen requests
+let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }] }
 
 let itemsCatalog = loadItemsCatalog() || {
   raw: ['Potato', 'Maida', 'Oil', 'Spices'],
@@ -61,8 +68,15 @@ let activeInventoryLocation = 'warehouse';
 
 // Stocks and logs are partitioned per location so that updates made for one
 // location (e.g. Kitchen) never bleed into another's (e.g. Shop 1) numbers.
-let locationStocks = loadLocationStocks() || buildDefaultLocationStocks();
-let locationLogs = loadLocationLogs() || buildDefaultLocationLogs();
+// Merge defaults so any new location keys (e.g. shop4) are present even when
+// loading older saved data that predates them.
+const _defaultStocks = buildDefaultLocationStocks();
+const _savedStocks = loadLocationStocks();
+let locationStocks = _savedStocks ? { ..._defaultStocks, ..._savedStocks } : _defaultStocks;
+
+const _defaultLogs = buildDefaultLocationLogs();
+const _savedLogs = loadLocationLogs();
+let locationLogs = _savedLogs ? { ..._defaultLogs, ..._savedLogs } : _defaultLogs;
 
 // Elements: { id, timestamp, fromLocation, item, qty, status: 'Pending' | 'Dispatched' | 'Received' }
 let warehouseRequests = loadWarehouseRequests() || [];
@@ -105,6 +119,8 @@ const stockItemSearch = document.getElementById('stock-item-search');
 const stockItemSuggestions = document.getElementById('stock-item-suggestions');
 const stockActionSelect = document.getElementById('stock-action-select');
 const stockQuantityInput = document.getElementById('stock-quantity-input');
+const stockSourceField = document.getElementById('stock-source-field');
+const stockSourceSelect = document.getElementById('stock-source-select');
 const stockModalError = document.getElementById('stock-modal-error');
 const stockSaveBtn = document.getElementById('stock-save-btn');
 const stockCancelBtn = document.getElementById('stock-cancel-btn');
@@ -121,6 +137,12 @@ const partialDispatchQtyInput = document.getElementById('partial-dispatch-qty-in
 const partialDispatchError = document.getElementById('partial-dispatch-error');
 const partialDispatchSendBtn = document.getElementById('partial-dispatch-send-btn');
 const partialDispatchCancelBtn = document.getElementById('partial-dispatch-cancel-btn');
+
+const batchSourceModal = document.getElementById('batch-source-modal');
+const batchSourceSelect = document.getElementById('batch-source-select');
+const batchSourceError = document.getElementById('batch-source-error');
+const batchSourceConfirmBtn = document.getElementById('batch-source-confirm-btn');
+const batchSourceCancelBtn = document.getElementById('batch-source-cancel-btn');
 
 const hamburgerBtn = document.getElementById('hamburger-btn');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
@@ -236,6 +258,7 @@ function buildDefaultLocationStocks() {
     shop1: {},
     shop2: {},
     shop3: {},
+    shop4: {},
   };
 }
 
@@ -246,6 +269,7 @@ function buildDefaultLocationLogs() {
     shop1: [],
     shop2: [],
     shop3: [],
+    shop4: [],
   };
 }
 
@@ -367,12 +391,18 @@ const ITEM_CATEGORIES = [
   { key: 'processed', label: 'Processed Items' },
 ];
 
+const STOCK_SOURCE_LABELS = {
+  online: 'Online',
+  supermarket: 'Supermarket',
+};
+
 const WAREHOUSE_SUBTAB_LABELS = {
   general: 'General Inventory',
   kitchen: 'Kitchen',
   shop1: 'Shop 1',
   shop2: 'Shop 2',
   shop3: 'Shop 3',
+  shop4: 'Shop 4',
 };
 
 // "General Inventory" is the warehouse's own stock, so it maps to the
@@ -384,6 +414,7 @@ const WAREHOUSE_SUBTAB_LOCATIONS = {
   shop1: 'shop1',
   shop2: 'shop2',
   shop3: 'shop3',
+  shop4: 'shop4',
 };
 
 function getActiveLocationKey() {
@@ -605,6 +636,8 @@ function renderWarehouseView() {
 
   if (activeWarehouseSubtab === 'general') {
     renderGeneralInventorySubtab();
+  } else if (activeWarehouseSubtab === 'requests') {
+    renderAllRequestsSubtab();
   } else if (activeWarehouseSubtab === 'kitchen') {
     // Kitchen subtab additionally lets the Warehouse ask Kitchen for processed items.
     renderKitchenSubtabContent();
@@ -625,26 +658,25 @@ const REQUEST_STATUS_BADGE_CLASSES = {
   Rejected: 'status-badge status-rejected',
 };
 
-// Decides which action button(s) a Pending request from a Shop/Kitchen gets,
-// based on whether the Warehouse currently holds enough stock to fulfil it:
-//   - enough stock      -> Dispatch (sends the full requested quantity)
-//   - some stock, not enough -> Send Partial (lets staff send what's available)
-//   - no stock at all   -> neither — Reject is the only option
-// This stops a Dispatch from ever pushing locationStocks.warehouse negative.
+// Decides which action button(s) a Pending request from a Shop/Kitchen gets:
+//   - enough stock      -> Partial + Dispatch + Reject (can choose to send all or less)
+//   - some stock, not enough -> Partial + Reject (can only send what's available)
+//   - no stock at all   -> Reject only
 function buildWarehouseRequestActionButtonsHtml(request) {
   if (request.status !== 'Pending') return '';
 
   const availableQty = locationStocks.warehouse[request.item] || 0;
-  let primaryBtn = '';
+  let primaryBtns = '';
 
   if (availableQty >= request.qty) {
-    primaryBtn = `<button type="button" class="dispatch-request-btn" data-request-id="${request.id}">Dispatch</button>`;
+    primaryBtns = `<button type="button" class="partial-dispatch-btn" data-request-id="${request.id}">Partial</button>
+                   <button type="button" class="dispatch-request-btn" data-request-id="${request.id}">Dispatch</button>`;
   } else if (availableQty > 0) {
-    primaryBtn = `<button type="button" class="partial-dispatch-btn" data-request-id="${request.id}">Send Partial</button>`;
+    primaryBtns = `<button type="button" class="partial-dispatch-btn" data-request-id="${request.id}">Partial</button>`;
   }
 
   return `<div class="request-action-group">
-            ${primaryBtn}
+            ${primaryBtns}
             <button type="button" class="reject-request-btn" data-request-id="${request.id}">Reject</button>
           </div>`;
 }
@@ -676,7 +708,7 @@ function buildIncomingRequestsSectionHtml(locationKey) {
               </thead>
               <tbody>
                 ${requests.map((request) => `
-                  <tr>
+                  <tr data-status="${escapeHtml(request.status)}">
                     <td>${escapeHtml(request.item)}</td>
                     <td>${request.qty}</td>
                     <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
@@ -715,6 +747,106 @@ function renderIncomingRequestsPanel(locationKey) {
   wireIncomingRequestActionListeners(warehouseSubtabContent);
 }
 
+// Consolidated view of every incoming request across all locations, so Warehouse
+// staff don't have to hop between per-location subtabs to action them. Includes
+// a "Dispatch All Possible" button that sweeps through every Pending request and
+// sends whatever it can — fully where stock allows, partially up to the max otherwise.
+function renderAllRequestsSubtab() {
+  const requests = [...warehouseRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const canDispatchAny = requests.some((request) => (
+    request.status === 'Pending' && (locationStocks.warehouse[request.item] || 0) > 0
+  ));
+
+  warehouseSubtabContent.innerHTML = `
+    <div class="all-requests-panel">
+      <div class="all-requests-toolbar">
+        <h3 class="requests-history-title">Requests from All Locations</h3>
+        <button type="button" class="dispatch-all-btn" ${canDispatchAny ? '' : 'disabled'}>Dispatch All Possible</button>
+      </div>
+      ${requests.length
+        ? `<div class="requests-table-wrap">
+            <table class="requests-table">
+              <thead>
+                <tr>
+                  <th>From</th>
+                  <th>Item</th>
+                  <th>Quantity</th>
+                  <th>Status</th>
+                  <th></th>
+                  <th>Timestamp</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${requests.map((request) => `
+                  <tr data-status="${escapeHtml(request.status)}">
+                    <td>${escapeHtml(WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation)}</td>
+                    <td>${escapeHtml(request.item)}</td>
+                    <td>${request.qty}</td>
+                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
+                    <td>${buildWarehouseRequestActionButtonsHtml(request)}</td>
+                    <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>`
+        : `<p class="empty-list-msg">No requests yet.</p>`}
+    </div>
+  `;
+
+  wireIncomingRequestActionListeners(warehouseSubtabContent);
+
+  const dispatchAllBtn = warehouseSubtabContent.querySelector('.dispatch-all-btn');
+  if (dispatchAllBtn) dispatchAllBtn.addEventListener('click', handleDispatchAllRequests);
+}
+
+// Sweeps every Pending request (oldest first, so earlier requesters get first
+// claim on limited stock) and sends whatever the warehouse can spare — fully
+// when there's enough, otherwise shrinking the request down to whatever's left,
+// mirroring the single-request Dispatch / Send Partial flows.
+function handleDispatchAllRequests() {
+  const pendingRequests = warehouseRequests
+    .filter((request) => request.status === 'Pending')
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const stock = locationStocks.warehouse;
+  let dispatchedAny = false;
+
+  pendingRequests.forEach((request) => {
+    const availableQty = stock[request.item] || 0;
+    if (availableQty <= 0) return;
+
+    const sendQty = roundToTwoDecimals(Math.min(availableQty, request.qty));
+    const isPartial = sendQty < request.qty;
+
+    if (isPartial) request.qty = sendQty;
+    request.status = 'Dispatched';
+
+    stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
+
+    locationLogs.warehouse.push({
+      timestamp: Date.now(),
+      item: request.item,
+      actionType: 'subtract',
+      qty: sendQty,
+      category: getCurrentUserRole(),
+      requestTag: isPartial
+        ? `Partial dispatch to ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`
+        : `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
+    });
+
+    dispatchedAny = true;
+  });
+
+  if (!dispatchedAny) return;
+
+  saveWarehouseRequests();
+  saveLocationStocks();
+  saveLocationLogs();
+
+  rerenderPreservingScroll();
+}
+
 // Kitchen subtab shows the usual "Requests from Kitchen" panel, plus a form
 // letting Warehouse staff ask Kitchen to make processed items, plus a history
 // of those outgoing requests.
@@ -738,8 +870,12 @@ function renderKitchenSubtabContent() {
             <input type="number" id="kitchen-request-qty-input" class="request-qty-input" min="1" step="1" placeholder="0" />
           </div>
           <p id="ask-kitchen-form-error" class="stock-modal-error" hidden></p>
-          <button type="submit" class="request-send-btn">Ask Kitchen</button>
+          <div class="request-form-btns">
+            <button type="button" class="request-add-btn">Add Item</button>
+            <button type="submit" class="request-send-btn">Send Request</button>
+          </div>
         </form>
+        ${buildRequestCartHtml(pendingKitchenRequestItems, 'kitchen-send-all-btn')}
       </section>
 
       <section class="requests-history">
@@ -777,7 +913,11 @@ function renderKitchenSubtabContent() {
   const askKitchenForm = warehouseSubtabContent.querySelector('#ask-kitchen-form');
   askKitchenForm.addEventListener('submit', (event) => {
     event.preventDefault();
-    handleSendKitchenRequest(askKitchenForm);
+    handleSendSingleKitchenRequest(askKitchenForm);
+  });
+
+  askKitchenForm.querySelector('.request-add-btn').addEventListener('click', () => {
+    handleAddToKitchenCart(askKitchenForm);
   });
 
   setupItemSearchAutocomplete(
@@ -786,6 +926,18 @@ function renderKitchenSubtabContent() {
     () => itemsCatalog.processed,
     () => hideRequestFormError(askKitchenForm)
   );
+
+  const kitchenSendAllBtn = warehouseSubtabContent.querySelector('.kitchen-send-all-btn');
+  if (kitchenSendAllBtn) {
+    kitchenSendAllBtn.addEventListener('click', handleSendAllKitchenRequests);
+  }
+
+  warehouseSubtabContent.querySelectorAll('.request-cart-remove-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      pendingKitchenRequestItems.splice(Number(btn.dataset.index), 1);
+      renderKitchenSubtabContent();
+    });
+  });
 }
 
 // Re-renders the current view without losing the user's place in a long
@@ -852,13 +1004,20 @@ function openPartialDispatchModal(requestId) {
   const availableQty = locationStocks.warehouse[request.item] || 0;
   if (availableQty <= 0) return;
 
-  pendingPartialDispatch = { source: 'warehouse', requestId };
-
   const fromLabel = WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation;
-  openPartialDispatchModalWithInfo(
-    `Warehouse only has <strong>${availableQty}</strong> ${escapeHtml(request.item)} in stock, but ${escapeHtml(fromLabel)} requested <strong>${request.qty}</strong>. You can send up to <strong>${availableQty}</strong> now — the rest of the request will be dropped.`,
-    availableQty
-  );
+  const hasFullStock = availableQty >= request.qty;
+
+  pendingPartialDispatch = {
+    source: 'warehouse',
+    requestId,
+    requestedQty: hasFullStock ? request.qty : undefined,
+  };
+
+  const infoHtml = hasFullStock
+    ? `Warehouse has <strong>${availableQty}</strong> ${escapeHtml(request.item)} available. ${escapeHtml(fromLabel)} requested <strong>${request.qty}</strong>. Enter how many to send — must be less than <strong>${request.qty}</strong>.`
+    : `Warehouse only has <strong>${availableQty}</strong> ${escapeHtml(request.item)} in stock, but ${escapeHtml(fromLabel)} requested <strong>${request.qty}</strong>. You can send up to <strong>${availableQty}</strong> now — the rest of the request will be dropped.`;
+
+  openPartialDispatchModalWithInfo(infoHtml, hasFullStock ? request.qty : availableQty);
 }
 
 // Mirrors openPartialDispatchModal for the Kitchen side of the flow — Warehouse
@@ -871,12 +1030,19 @@ function openPartialKitchenDispatchModal(requestId) {
   const availableQty = locationStocks.kitchen[request.item] || 0;
   if (availableQty <= 0) return;
 
-  pendingPartialDispatch = { source: 'kitchen', requestId };
+  const hasFullStock = availableQty >= request.qty;
 
-  openPartialDispatchModalWithInfo(
-    `Kitchen only has <strong>${availableQty}</strong> ${escapeHtml(request.item)} in stock, but Warehouse requested <strong>${request.qty}</strong>. You can send up to <strong>${availableQty}</strong> now — the rest of the request will be dropped.`,
-    availableQty
-  );
+  pendingPartialDispatch = {
+    source: 'kitchen',
+    requestId,
+    requestedQty: hasFullStock ? request.qty : undefined,
+  };
+
+  const infoHtml = hasFullStock
+    ? `Kitchen has <strong>${availableQty}</strong> ${escapeHtml(request.item)} available. Warehouse requested <strong>${request.qty}</strong>. Enter how many to send — must be less than <strong>${request.qty}</strong>.`
+    : `Kitchen only has <strong>${availableQty}</strong> ${escapeHtml(request.item)} in stock, but Warehouse requested <strong>${request.qty}</strong>. You can send up to <strong>${availableQty}</strong> now — the rest of the request will be dropped.`;
+
+  openPartialDispatchModalWithInfo(infoHtml, hasFullStock ? request.qty : availableQty);
 }
 
 function openPartialDispatchModalWithInfo(infoHtml, availableQty) {
@@ -908,11 +1074,17 @@ function hidePartialDispatchError() {
 // Shared by both partial-dispatch flows so the rules — and their error copy —
 // for "how much can actually be sent" stay identical no matter which side
 // (Warehouse or Kitchen) is doing the sending.
-function readPartialDispatchQuantity(availableQty, itemName) {
+// requestedQty is passed when the sender has enough stock — partial must then
+// be strictly less than what was requested (Dispatch handles the full amount).
+function readPartialDispatchQuantity(availableQty, itemName, requestedQty) {
   const sendQty = Number(partialDispatchQtyInput.value);
 
   if (!Number.isFinite(sendQty) || sendQty <= 0) {
     return { error: 'Please enter a quantity greater than zero.' };
+  }
+
+  if (requestedQty !== undefined && sendQty >= requestedQty) {
+    return { error: `Partial must be less than the requested amount (${requestedQty}). Use Dispatch to send the full amount.` };
   }
 
   if (sendQty > availableQty) {
@@ -943,7 +1115,7 @@ function confirmPartialWarehouseDispatch() {
   const availableQty = stock[request.item] || 0;
 
   hidePartialDispatchError();
-  const result = readPartialDispatchQuantity(availableQty, request.item);
+  const result = readPartialDispatchQuantity(availableQty, request.item, pendingPartialDispatch.requestedQty);
   if (result.error) {
     showPartialDispatchError(result.error);
     return;
@@ -985,7 +1157,7 @@ function confirmPartialKitchenDispatch() {
   const availableQty = stock[request.item] || 0;
 
   hidePartialDispatchError();
-  const result = readPartialDispatchQuantity(availableQty, request.item);
+  const result = readPartialDispatchQuantity(availableQty, request.item, pendingPartialDispatch.requestedQty);
   if (result.error) {
     showPartialDispatchError(result.error);
     return;
@@ -1035,7 +1207,6 @@ function renderInventoryDashboard(container, locationKey) {
       <div class="warehouse-toolbar">
         <input type="text" class="warehouse-search-input" placeholder="Search items..." autocomplete="off" />
         <div class="warehouse-toolbar-actions">
-          <button type="button" class="warehouse-toolbar-btn" data-inventory-action="update-stock">Update Stock</button>
           <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-csv">Export Excel (CSV)</button>
           <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-logs">Export Logs (TXT)</button>
         </div>
@@ -1046,16 +1217,34 @@ function renderInventoryDashboard(container, locationKey) {
           <section class="inventory-column">
             <h3 class="inventory-column-title">${category.label}</h3>
             ${itemsCatalog[category.key].length
-              ? `<ul class="inventory-list">
-                  ${itemsCatalog[category.key]
-                    .map((item) => `
-                      <li class="inventory-row">
-                        <span class="inventory-item-name">${escapeHtml(item)}</span>
-                        <span class="inventory-item-qty">${stock[item] || 0}</span>
-                      </li>
-                    `)
-                    .join('')}
-                </ul>`
+              ? `<div class="inventory-table-wrap">
+                  <table class="inventory-table">
+                    <thead>
+                      <tr>
+                        <th>Item</th>
+                        <th>Stock</th>
+                        <th>Add</th>
+                        <th>Remove</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${itemsCatalog[category.key].map((item) => `
+                        <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                          <td class="inventory-item-name">${escapeHtml(item)}</td>
+                          <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
+                          <td><input type="number" class="batch-qty-input batch-add-input" min="0" step="any" placeholder="–" /></td>
+                          <td><input type="number" class="batch-qty-input batch-remove-input" min="0" step="any" placeholder="–" /></td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                </div>
+                <div class="batch-section-footer">
+                  <p class="batch-update-error stock-modal-error" hidden></p>
+                  <button type="button" class="update-stock-section-btn" data-category="${category.key}">
+                    Update Stock
+                  </button>
+                </div>`
               : `<p class="empty-list-msg">No items in this category yet.</p>`}
           </section>
         `).join('')}
@@ -1069,18 +1258,18 @@ function renderInventoryDashboard(container, locationKey) {
   `;
 
   const searchInput = container.querySelector('.warehouse-search-input');
-  searchInput.addEventListener('input', () => {
-    filterInventoryRows(container, searchInput);
-  });
+  searchInput.addEventListener('input', () => filterInventoryRows(container, searchInput));
 
-  container.querySelector('[data-inventory-action="update-stock"]').addEventListener('click', openStockModal);
   container.querySelector('[data-inventory-action="export-csv"]').addEventListener('click', handleExportCsv);
   container.querySelector('[data-inventory-action="export-logs"]').addEventListener('click', handleExportLogs);
+
+  container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
+    btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
+  });
 }
 
 function filterInventoryRows(container, searchInput) {
   const query = searchInput.value.trim().toLowerCase();
-
   container.querySelectorAll('.inventory-row').forEach((row) => {
     const name = row.querySelector('.inventory-item-name').textContent.toLowerCase();
     row.hidden = query.length > 0 && !name.includes(query);
@@ -1105,6 +1294,7 @@ function renderLogFeedHtml() {
             <strong>${escapeHtml(log.item)}</strong> ${log.actionType === 'add' ? 'added' : 'subtracted'} ${log.qty}
             <span class="log-feed-category">(${escapeHtml(ROLE_LABELS[log.category] || log.category)})</span>
             ${log.requestTag ? `<span class="log-feed-tag">(${escapeHtml(log.requestTag)})</span>` : ''}
+            ${log.source ? `<span class="log-feed-note">(${escapeHtml(STOCK_SOURCE_LABELS[log.source] || log.source)})</span>` : ''}
           </span>
         </li>
       `).join('')}
@@ -1165,7 +1355,36 @@ function renderLocationSubtabContent(viewKey) {
 
 // ===================== Warehouse Requests (Shop / Kitchen side) =====================
 
+function buildRequestCartHtml(items, sendAllBtnClass) {
+  if (items.length === 0) return '';
+
+  const rows = items.map((entry, idx) => `
+    <div class="request-cart-row">
+      <span class="request-cart-item-name">${escapeHtml(entry.item)}</span>
+      <span class="request-cart-qty">× ${entry.qty}</span>
+      <button type="button" class="request-cart-remove-btn" data-index="${idx}" aria-label="Remove">✕</button>
+    </div>
+  `).join('');
+
+  const label = items.length === 1 ? '1 item' : `${items.length} items`;
+
+  return `
+    <div class="request-cart">
+      <div class="request-cart-list">${rows}</div>
+      <button type="button" class="request-send-btn ${sendAllBtnClass}">
+        Send Request (${label})
+      </button>
+    </div>
+  `;
+}
+
 function renderWarehouseRequestsPanel(container, locationKey) {
+  // Reset cart if user switched to a different location
+  if (pendingRequestLocation !== locationKey) {
+    pendingRequestItems = [];
+    pendingRequestLocation = locationKey;
+  }
+
   const requests = warehouseRequests
     .filter((request) => request.fromLocation === locationKey)
     .sort((a, b) => b.timestamp - a.timestamp);
@@ -1185,8 +1404,12 @@ function renderWarehouseRequestsPanel(container, locationKey) {
             <input type="number" id="request-qty-input" class="request-qty-input" min="1" step="1" placeholder="0" />
           </div>
           <p id="request-form-error" class="stock-modal-error" hidden></p>
-          <button type="submit" class="request-send-btn">Send Request</button>
+          <div class="request-form-btns">
+            <button type="button" class="request-add-btn">Add Item</button>
+            <button type="submit" class="request-send-btn">Send Request</button>
+          </div>
         </form>
+        ${buildRequestCartHtml(pendingRequestItems, 'request-send-all-btn')}
       </section>
 
       <section class="requests-history">
@@ -1205,7 +1428,7 @@ function renderWarehouseRequestsPanel(container, locationKey) {
                 </thead>
                 <tbody>
                   ${requests.map((request) => `
-                    <tr>
+                    <tr data-status="${escapeHtml(request.status)}">
                       <td>${escapeHtml(request.item)}</td>
                       <td>${request.qty}</td>
                       <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
@@ -1228,7 +1451,11 @@ function renderWarehouseRequestsPanel(container, locationKey) {
   const form = container.querySelector('#warehouse-request-form');
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    handleSendWarehouseRequest(form, locationKey);
+    handleSendSingleWarehouseRequest(form, locationKey);
+  });
+
+  form.querySelector('.request-add-btn').addEventListener('click', () => {
+    handleAddToRequestCart(form, locationKey, container);
   });
 
   setupItemSearchAutocomplete(
@@ -1237,6 +1464,18 @@ function renderWarehouseRequestsPanel(container, locationKey) {
     getCatalogItemNames,
     () => hideRequestFormError(form)
   );
+
+  const sendAllBtn = container.querySelector('.request-send-all-btn');
+  if (sendAllBtn) {
+    sendAllBtn.addEventListener('click', () => handleSendAllWarehouseRequests(locationKey));
+  }
+
+  container.querySelectorAll('.request-cart-remove-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      pendingRequestItems.splice(Number(btn.dataset.index), 1);
+      renderWarehouseRequestsPanel(container, locationKey);
+    });
+  });
 
   container.querySelectorAll('.mark-received-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1270,16 +1509,17 @@ function buildIncomingKitchenRequestActionButtonsHtml(request) {
   if (request.status !== 'Pending') return '';
 
   const availableQty = locationStocks.kitchen[request.item] || 0;
-  let primaryBtn = '';
+  let primaryBtns = '';
 
   if (availableQty >= request.qty) {
-    primaryBtn = `<button type="button" class="dispatch-request-btn dispatch-kitchen-action-btn" data-request-id="${request.id}">Dispatch</button>`;
+    primaryBtns = `<button type="button" class="partial-dispatch-btn partial-dispatch-kitchen-action-btn" data-request-id="${request.id}">Partial</button>
+                   <button type="button" class="dispatch-request-btn dispatch-kitchen-action-btn" data-request-id="${request.id}">Dispatch</button>`;
   } else if (availableQty > 0) {
-    primaryBtn = `<button type="button" class="partial-dispatch-btn partial-dispatch-kitchen-action-btn" data-request-id="${request.id}">Send Partial</button>`;
+    primaryBtns = `<button type="button" class="partial-dispatch-btn partial-dispatch-kitchen-action-btn" data-request-id="${request.id}">Partial</button>`;
   }
 
   return `<div class="request-action-group">
-            ${primaryBtn}
+            ${primaryBtns}
             <button type="button" class="reject-request-btn reject-kitchen-action-btn" data-request-id="${request.id}">Reject</button>
           </div>`;
 }
@@ -1304,7 +1544,7 @@ function buildIncomingWarehouseRequestsSectionHtml() {
               </thead>
               <tbody>
                 ${requests.map((request) => `
-                  <tr>
+                  <tr data-status="${escapeHtml(request.status)}">
                     <td>${escapeHtml(request.item)}</td>
                     <td>${request.qty}</td>
                     <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
@@ -1332,7 +1572,39 @@ function hideRequestFormError(form) {
   errorEl.textContent = '';
 }
 
-function handleSendWarehouseRequest(form, locationKey) {
+function handleAddToRequestCart(form, locationKey, container) {
+  const itemSearchInput = form.querySelector('#request-item-search');
+  const qtyInput = form.querySelector('#request-qty-input');
+
+  const itemName = findCatalogItemByName(itemSearchInput.value);
+  const quantity = Number(qtyInput.value);
+
+  hideRequestFormError(form);
+
+  if (!itemName) {
+    showRequestFormError(form, 'Please select a valid item from the catalog.');
+    return;
+  }
+
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    showRequestFormError(form, 'Please enter a quantity greater than zero.');
+    return;
+  }
+
+  const existing = pendingRequestItems.find((entry) => entry.item === itemName);
+  if (existing) {
+    existing.qty += quantity;
+  } else {
+    pendingRequestItems.push({ item: itemName, qty: quantity });
+  }
+
+  // Re-render the panel to show the updated cart, then focus the item field
+  // so the user can immediately search for the next item.
+  renderWarehouseRequestsPanel(container, locationKey);
+  container.querySelector('#request-item-search')?.focus();
+}
+
+function handleSendSingleWarehouseRequest(form, locationKey) {
   const itemSearchInput = form.querySelector('#request-item-search');
   const qtyInput = form.querySelector('#request-qty-input');
 
@@ -1364,6 +1636,28 @@ function handleSendWarehouseRequest(form, locationKey) {
   renderView(currentViewKey);
 }
 
+function handleSendAllWarehouseRequests(locationKey) {
+  if (pendingRequestItems.length === 0) return;
+
+  const now = Date.now();
+  pendingRequestItems.forEach((entry, idx) => {
+    warehouseRequests.push({
+      id: now + idx,
+      timestamp: now + idx,
+      fromLocation: locationKey,
+      item: entry.item,
+      qty: entry.qty,
+      status: 'Pending',
+    });
+  });
+  saveWarehouseRequests();
+
+  pendingRequestItems = [];
+  pendingRequestLocation = null;
+
+  renderView(currentViewKey);
+}
+
 function handleMarkRequestReceived(requestId) {
   const request = warehouseRequests.find((entry) => entry.id === requestId);
   if (!request || request.status !== 'Dispatched') return;
@@ -1388,35 +1682,78 @@ function handleMarkRequestReceived(requestId) {
   rerenderPreservingScroll();
 }
 
-function handleSendKitchenRequest(form) {
-  const itemSearchInput = form.querySelector('#kitchen-request-item-search');
-  const qtyInput = form.querySelector('#kitchen-request-qty-input');
-
-  const itemName = findItemInList(itemSearchInput.value, itemsCatalog.processed);
-  const quantity = Number(qtyInput.value);
+function validateKitchenRequestForm(form) {
+  const itemName = findItemInList(
+    form.querySelector('#kitchen-request-item-search').value,
+    itemsCatalog.processed
+  );
+  const quantity = Number(form.querySelector('#kitchen-request-qty-input').value);
 
   hideRequestFormError(form);
 
   if (!itemName) {
     showRequestFormError(form, 'Please select a valid processed item.');
-    return;
+    return null;
   }
-
   if (!Number.isFinite(quantity) || quantity <= 0) {
     showRequestFormError(form, 'Please enter a quantity greater than zero.');
-    return;
+    return null;
   }
+  return { itemName, quantity };
+}
+
+function handleSendSingleKitchenRequest(form) {
+  const result = validateKitchenRequestForm(form);
+  if (!result) return;
 
   kitchenRequests.push({
     id: Date.now(),
     timestamp: Date.now(),
-    item: itemName,
-    qty: quantity,
+    item: result.itemName,
+    qty: result.quantity,
     status: 'Pending',
   });
   saveKitchenRequests();
-
   renderView(currentViewKey);
+}
+
+function handleAddToKitchenCart(form) {
+  const result = validateKitchenRequestForm(form);
+  if (!result) return;
+
+  const existing = pendingKitchenRequestItems.find((e) => e.item === result.itemName);
+  if (existing) {
+    existing.qty += result.quantity;
+  } else {
+    pendingKitchenRequestItems.push({ item: result.itemName, qty: result.quantity });
+  }
+
+  renderKitchenSubtabContent();
+  warehouseSubtabContent.querySelector('#kitchen-request-item-search')?.focus();
+}
+
+function handleSendAllKitchenRequests() {
+  if (pendingKitchenRequestItems.length === 0) return;
+
+  const now = Date.now();
+  pendingKitchenRequestItems.forEach((entry, idx) => {
+    kitchenRequests.push({
+      id: now + idx,
+      timestamp: now + idx,
+      item: entry.item,
+      qty: entry.qty,
+      status: 'Pending',
+    });
+  });
+  saveKitchenRequests();
+
+  pendingKitchenRequestItems = [];
+  renderView(currentViewKey);
+}
+
+// kept for any legacy call sites
+function handleSendKitchenRequest(form) {
+  handleSendSingleKitchenRequest(form);
 }
 
 function handleDispatchKitchenRequest(requestId) {
@@ -1550,11 +1887,17 @@ function openStockModal() {
   stockItemSearch.value = '';
   stockActionSelect.value = 'add';
   stockQuantityInput.value = '';
+  stockSourceSelect.value = '';
+  stockSourceField.hidden = !stockUpdateRequiresSource();
   hideStockModalError();
   hideStockSuggestions();
 
   stockModal.hidden = false;
   stockItemSearch.focus();
+}
+
+function stockUpdateRequiresSource() {
+  return LOCATION_VIEWS.includes(activeInventoryLocation);
 }
 
 function closeStockModal() {
@@ -1598,6 +1941,7 @@ function handleStockSave() {
   const itemName = findCatalogItemByName(stockItemSearch.value);
   const quantity = Number(stockQuantityInput.value);
   const actionType = stockActionSelect.value;
+  const source = stockSourceSelect.value;
 
   if (!itemName) {
     showStockModalError('Please select a valid item from the catalog.');
@@ -1606,6 +1950,11 @@ function handleStockSave() {
 
   if (!Number.isFinite(quantity) || quantity <= 0) {
     showStockModalError('Please enter a quantity greater than zero.');
+    return;
+  }
+
+  if (stockUpdateRequiresSource() && !source) {
+    showStockModalError('Please select a source — Online or Supermarket.');
     return;
   }
 
@@ -1618,13 +1967,15 @@ function handleStockSave() {
     : currentQty - quantity;
   saveLocationStocks();
 
-  locationLogs[locationKey].push({
+  const logEntry = {
     timestamp: Date.now(),
     item: itemName,
     actionType,
     qty: quantity,
     category: getCurrentUserRole(),
-  });
+  };
+  if (source) logEntry.source = source;
+  locationLogs[locationKey].push(logEntry);
   saveLocationLogs();
 
   closeStockModal();
@@ -1668,16 +2019,64 @@ function formatOrdinalDateHeader(date) {
   return `${day}${getOrdinalSuffix(day)} ${MONTH_NAMES[date.getMonth()]} ${date.getFullYear()}`;
 }
 
+// Maps a single log entry to its action direction and the counter-party
+// location (or 'own' for direct stock edits). Used to split the CSV export
+// into per-source columns rather than one flat total.
+function classifyLogEntry(log, locationKey) {
+  const { requestTag, actionType } = log;
+
+  if (!requestTag) return { action: actionType, source: 'own' };
+
+  if (locationKey === 'warehouse') {
+    if (requestTag === 'Received from Kitchen' || requestTag === 'Partial receipt from Kitchen') {
+      return { action: actionType, source: 'kitchen' };
+    }
+    const locationKeys = Object.keys(WAREHOUSE_SUBTAB_LABELS).filter((k) => k !== 'general');
+    for (let i = 0; i < locationKeys.length; i += 1) {
+      const locKey = locationKeys[i];
+      const label = WAREHOUSE_SUBTAB_LABELS[locKey];
+      if (requestTag === `Request from ${label}` || requestTag === `Partial dispatch to ${label}`) {
+        return { action: actionType, source: locKey };
+      }
+    }
+  } else {
+    if (requestTag === 'Warehouse Request' || requestTag === 'Dispatched to Warehouse' || requestTag === 'Partial dispatch to Warehouse') {
+      return { action: actionType, source: 'warehouse' };
+    }
+  }
+
+  return { action: actionType, source: 'own' };
+}
+
 function buildMonthlyInventoryCsv() {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
+  const locationKey = activeInventoryLocation;
 
-  const sortedLogs = [...locationLogs[activeInventoryLocation]].sort((a, b) => a.timestamp - b.timestamp);
+  const sortedLogs = [...locationLogs[locationKey]].sort((a, b) => a.timestamp - b.timestamp);
   const allItems = [...getCatalogItemNames()].sort((a, b) => a.localeCompare(b));
 
-  // Walk the month day-by-day (1st through today), carrying running totals
-  // forward across days so every date gets a snapshot — even quiet ones.
+  // Source breakdown columns differ by location type.
+  // Warehouse sees its own updates plus transfers to/from each other location.
+  // Kitchen and shops see own updates plus transfers to/from warehouse.
+  const sourceCols = locationKey === 'warehouse'
+    ? ['own', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4']
+    : ['own', 'warehouse'];
+
+  const sourceColLabels = sourceCols.map((src) => {
+    if (src === 'own') return 'Own';
+    if (src === 'warehouse') return 'Warehouse';
+    return WAREHOUSE_SUBTAB_LABELS[src] || src;
+  });
+
+  // Each day contributes: [added sources... | Added Total] + [subtracted sources... | Subtracted Total] + End of Day Total
+  const addedCols = [...sourceColLabels, 'Total'];
+  const subtractedCols = [...sourceColLabels, 'Total'];
+  const totalDataColsPerDay = addedCols.length + subtractedCols.length + 1;
+
+  // Walk the month day-by-day, carrying running totals forward across days
+  // so every date gets a snapshot — even quiet ones.
   const runningTotals = {};
   let logIndex = 0;
   const dailyActivities = [];
@@ -1692,10 +2091,17 @@ function buildMonthlyInventoryCsv() {
       const currentTotal = runningTotals[log.item] || 0;
       runningTotals[log.item] = log.actionType === 'add' ? currentTotal + log.qty : currentTotal - log.qty;
 
-      if (!activity.has(log.item)) activity.set(log.item, { added: 0, subtracted: 0 });
+      if (!activity.has(log.item)) {
+        const initSources = {};
+        sourceCols.forEach((s) => { initSources[s] = 0; });
+        activity.set(log.item, { added: { ...initSources }, subtracted: { ...initSources } });
+      }
+
       const entry = activity.get(log.item);
-      if (log.actionType === 'add') entry.added += log.qty;
-      else entry.subtracted += log.qty;
+      const { action, source } = classifyLogEntry(log, locationKey);
+      const bucket = action === 'add' ? entry.added : entry.subtracted;
+      const targetSource = sourceCols.includes(source) ? source : 'own';
+      bucket[targetSource] = (bucket[targetSource] || 0) + log.qty;
 
       logIndex += 1;
     }
@@ -1705,22 +2111,29 @@ function buildMonthlyInventoryCsv() {
   }
 
   const itemColumns = ['Item Category', 'Item Name'];
-  const dataColumns = ['Total Added (Bought)', 'Total Subtracted (Sold/Used)', 'End of Day Total'];
   const dayCount = now.getDate();
 
-  // Item columns are written once on the left; each date then contributes
-  // just its data columns, repeated side by side — so the item list isn't
-  // duplicated for every day in the month.
-  const dateHeaderRow = [...itemColumns.map(() => '')];
+  // Three header rows:
+  //   Row 1 — date label spanning all data columns for that day
+  //   Row 2 — "Added" and "Subtracted" section labels + "End of Day Total"
+  //   Row 3 — individual source column names + "Total" + "End of Day Total"
+  const dateHeaderRow = itemColumns.map(() => '');
+  const sectionHeaderRow = itemColumns.map(() => '');
   const columnHeaderRow = [...itemColumns];
 
   for (let day = 1; day <= dayCount; day += 1) {
-    dateHeaderRow.push(formatOrdinalDateHeader(new Date(year, month, day)), ...Array(dataColumns.length - 1).fill(''));
-    columnHeaderRow.push(...dataColumns);
+    dateHeaderRow.push(formatOrdinalDateHeader(new Date(year, month, day)), ...Array(totalDataColsPerDay - 1).fill(''));
+    sectionHeaderRow.push(
+      'Added', ...Array(addedCols.length - 1).fill(''),
+      'Subtracted', ...Array(subtractedCols.length - 1).fill(''),
+      'End of Day Total',
+    );
+    columnHeaderRow.push(...addedCols, ...subtractedCols, 'End of Day Total');
   }
 
   const lines = [];
   lines.push(dateHeaderRow.map(csvEscape).join(','));
+  lines.push(sectionHeaderRow.map(csvEscape).join(','));
   lines.push(columnHeaderRow.map(csvEscape).join(','));
 
   allItems.forEach((item) => {
@@ -1728,11 +2141,20 @@ function buildMonthlyInventoryCsv() {
 
     for (let day = 1; day <= dayCount; day += 1) {
       const index = day - 1;
-      const itemActivity = dailyActivities[index].get(item) || { added: 0, subtracted: 0 };
+      const itemActivity = dailyActivities[index].get(item);
       const snapshot = dailySnapshots[index];
       const endOfDayTotal = snapshot[item] !== undefined ? snapshot[item] : 0;
 
-      row.push(String(itemActivity.added), String(itemActivity.subtracted), String(endOfDayTotal));
+      const addedTotal = sourceCols.reduce((sum, src) => sum + (itemActivity ? itemActivity.added[src] : 0), 0);
+      const subtractedTotal = sourceCols.reduce((sum, src) => sum + (itemActivity ? itemActivity.subtracted[src] : 0), 0);
+
+      sourceCols.forEach((src) => row.push(String(itemActivity ? itemActivity.added[src] : 0)));
+      row.push(String(addedTotal));
+
+      sourceCols.forEach((src) => row.push(String(itemActivity ? itemActivity.subtracted[src] : 0)));
+      row.push(String(subtractedTotal));
+
+      row.push(String(endOfDayTotal));
     }
 
     lines.push(row.map(csvEscape).join(','));
@@ -1748,7 +2170,8 @@ function buildInventoryLogText() {
     .map((log) => {
       const roleLabel = (ROLE_LABELS[log.category] || log.category || '').toUpperCase();
       const action = log.actionType === 'add' ? 'Added' : 'Subtracted';
-      return `[${formatLogTimestamp(log.timestamp)}] ${roleLabel}: ${action} ${log.qty} ${log.item}`;
+      const sourceSuffix = log.source ? ` — ${STOCK_SOURCE_LABELS[log.source] || log.source}` : '';
+      return `[${formatLogTimestamp(log.timestamp)}] ${roleLabel}: ${action} ${log.qty} ${log.item}${sourceSuffix}`;
     })
     .join('\r\n');
 }
@@ -1765,6 +2188,96 @@ function downloadTextFile(filename, content, mimeType) {
   document.body.removeChild(link);
 
   URL.revokeObjectURL(url);
+}
+
+function handleBatchUpdateClick(container, categoryKey, locationKey) {
+  const section = container.querySelector(`[data-category="${categoryKey}"]`).closest('.inventory-column');
+  const errorEl = section.querySelector('.batch-update-error');
+  const stock = locationStocks[locationKey];
+
+  // Clear previous error state
+  section.querySelectorAll('.inventory-row').forEach((row) => row.classList.remove('invalid-batch-row'));
+  errorEl.hidden = true;
+
+  const changes = [];
+  let hasConflict = false;
+  let hasInvalid = false;
+
+  section.querySelectorAll('.inventory-row').forEach((row) => {
+    const item = row.dataset.item;
+    const addQty = Number(row.querySelector('.batch-add-input').value) || 0;
+    const removeQty = Number(row.querySelector('.batch-remove-input').value) || 0;
+
+    if (addQty > 0 && removeQty > 0) {
+      row.classList.add('invalid-batch-row');
+      hasConflict = true;
+      return;
+    }
+    if (addQty > 0) {
+      changes.push({ item, actionType: 'add', qty: addQty });
+    }
+    if (removeQty > 0) {
+      const currentStock = stock[item] || 0;
+      if (removeQty > currentStock) {
+        row.classList.add('invalid-batch-row');
+        hasInvalid = true;
+      } else {
+        changes.push({ item, actionType: 'subtract', qty: removeQty });
+      }
+    }
+  });
+
+  if (hasConflict) {
+    errorEl.textContent = 'Highlighted rows have both Add and Remove filled — use only one per item.';
+    errorEl.hidden = false;
+    return;
+  }
+  if (hasInvalid) {
+    errorEl.textContent = 'Highlighted rows cannot be removed — quantity exceeds current stock.';
+    errorEl.hidden = false;
+    return;
+  }
+  if (changes.length === 0) return;
+
+  pendingBatchUpdate = { locationKey, changes };
+
+  if (stockUpdateRequiresSource()) {
+    batchSourceSelect.value = '';
+    batchSourceError.hidden = true;
+    batchSourceModal.hidden = false;
+  } else {
+    applyBatchUpdate(null);
+  }
+}
+
+function applyBatchUpdate(source) {
+  if (!pendingBatchUpdate) return;
+
+  const { locationKey, changes } = pendingBatchUpdate;
+  const stock = locationStocks[locationKey];
+  const now = Date.now();
+
+  changes.forEach((change, idx) => {
+    const currentQty = stock[change.item] || 0;
+    stock[change.item] = change.actionType === 'add'
+      ? roundToTwoDecimals(currentQty + change.qty)
+      : roundToTwoDecimals(currentQty - change.qty);
+
+    const logEntry = {
+      timestamp: now + idx,
+      item: change.item,
+      actionType: change.actionType,
+      qty: change.qty,
+      category: getCurrentUserRole(),
+    };
+    if (source) logEntry.source = source;
+    locationLogs[locationKey].push(logEntry);
+  });
+
+  saveLocationStocks();
+  saveLocationLogs();
+  pendingBatchUpdate = null;
+  renderView(currentViewKey);
 }
 
 function handleExportCsv() {
@@ -1836,6 +2349,21 @@ editItemInput.addEventListener('keydown', (event) => {
 
 partialDispatchSendBtn.addEventListener('click', handleConfirmPartialDispatch);
 partialDispatchCancelBtn.addEventListener('click', closePartialDispatchModal);
+
+batchSourceConfirmBtn.addEventListener('click', () => {
+  const source = batchSourceSelect.value;
+  if (!source) {
+    batchSourceError.textContent = 'Please select a source.';
+    batchSourceError.hidden = false;
+    return;
+  }
+  batchSourceModal.hidden = true;
+  applyBatchUpdate(source);
+});
+batchSourceCancelBtn.addEventListener('click', () => {
+  batchSourceModal.hidden = true;
+  pendingBatchUpdate = null;
+});
 
 partialDispatchQtyInput.addEventListener('input', hidePartialDispatchError);
 
