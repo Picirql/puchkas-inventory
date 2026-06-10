@@ -1,5 +1,11 @@
 // ===================== Config =====================
 
+// Fill these in with your Supabase project's URL and anon/public key
+// (Project Settings -> API in the Supabase dashboard).
+const SUPABASE_URL = 'https://ilukgcqcvysduxczhrfi.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlsdWtnY3FjdnlzZHV4Y3pocmZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwNzgwMTEsImV4cCI6MjA5NjY1NDAxMX0.2H9mO-qpQKJLNffqLB3Ekmu5QUWadRwkF5DhzC3k8SE';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const PINS = {
   manager: '1234',
   warehouse: '2222',
@@ -48,15 +54,13 @@ let pendingRemoval = null;
 let pendingEdit = null;
 let pendingPartialDispatch = null;
 let currentViewKey = null;
-let pendingRequestItems = []; // [{ item, qty }] — cart built before submitting all at once
-let pendingRequestLocation = null; // location the cart belongs to; reset if user switches location
-let pendingKitchenRequestItems = []; // same cart pattern for Warehouse → Kitchen requests
 let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }] }
+let pendingLoginRole = null; // role to retry entering after a failed initial Supabase load
 
-let itemsCatalog = loadItemsCatalog() || {
-  raw: ['Potato', 'Maida', 'Oil', 'Spices'],
-  processed: ['Puchka Shells', 'Sweet Water', 'Spicy Water', 'Masala Mix'],
-};
+// All five of these are populated from Supabase by loadAllDataFromSupabase()
+// once the user logs in — see "Supabase Sync" below. They start out empty so
+// the app has a valid shape to render before that fetch resolves.
+let itemsCatalog = { raw: [], processed: [] };
 
 let activeWarehouseSubtab = 'general';
 let activeLocationSubtab = 'general';
@@ -68,22 +72,15 @@ let activeInventoryLocation = 'warehouse';
 
 // Stocks and logs are partitioned per location so that updates made for one
 // location (e.g. Kitchen) never bleed into another's (e.g. Shop 1) numbers.
-// Merge defaults so any new location keys (e.g. shop4) are present even when
-// loading older saved data that predates them.
-const _defaultStocks = buildDefaultLocationStocks();
-const _savedStocks = loadLocationStocks();
-let locationStocks = _savedStocks ? { ..._defaultStocks, ..._savedStocks } : _defaultStocks;
-
-const _defaultLogs = buildDefaultLocationLogs();
-const _savedLogs = loadLocationLogs();
-let locationLogs = _savedLogs ? { ..._defaultLogs, ..._savedLogs } : _defaultLogs;
+let locationStocks = buildDefaultLocationStocks();
+let locationLogs = buildDefaultLocationLogs();
 
 // Elements: { id, timestamp, fromLocation, item, qty, status: 'Pending' | 'Dispatched' | 'Received' }
-let warehouseRequests = loadWarehouseRequests() || [];
+let warehouseRequests = [];
 
 // Requests made by the Warehouse to the Kitchen (the reverse direction of warehouseRequests).
 // Elements: { id, timestamp, item, qty, status: 'Pending' | 'Dispatched' | 'Rejected' }
-let kitchenRequests = loadKitchenRequests() || [];
+let kitchenRequests = [];
 
 // ===================== DOM References =====================
 
@@ -102,8 +99,14 @@ const keypadButtons = document.querySelectorAll('.key');
 
 const loggedInRoleLabel = document.getElementById('logged-in-role');
 const logoutBtn = document.getElementById('logout-btn');
+const refreshDataBtn = document.getElementById('refresh-data-btn');
 const navButtons = document.querySelectorAll('.nav-btn');
 const viewContent = document.getElementById('view-content');
+
+const dataLoadingOverlay = document.getElementById('data-loading-overlay');
+const dataLoadingStatus = document.getElementById('data-loading-status');
+const dataLoadingError = document.getElementById('data-loading-error');
+const dataLoadingRetryBtn = document.getElementById('data-loading-retry-btn');
 
 const warehouseView = document.getElementById('warehouse-view');
 const warehouseSubtabButtons = document.querySelectorAll('.warehouse-subtab-btn');
@@ -146,6 +149,11 @@ const batchSourceCancelBtn = document.getElementById('batch-source-cancel-btn');
 
 const hamburgerBtn = document.getElementById('hamburger-btn');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+const migrateModal = document.getElementById('migrate-modal');
+const migrateStatus = document.getElementById('migrate-status');
+const migrateCancelBtn = document.getElementById('migrate-cancel-btn');
+const migrateConfirmBtn = document.getElementById('migrate-confirm-btn');
 
 // ===================== PIN Pad =====================
 
@@ -236,21 +244,6 @@ function clearSession() {
   localStorage.removeItem(SESSION_KEY);
 }
 
-function saveItemsCatalog() {
-  localStorage.setItem(ITEMS_CATALOG_KEY, JSON.stringify(itemsCatalog));
-}
-
-function loadItemsCatalog() {
-  const raw = localStorage.getItem(ITEMS_CATALOG_KEY);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
-  }
-}
-
 function buildDefaultLocationStocks() {
   return {
     warehouse: {},
@@ -273,70 +266,318 @@ function buildDefaultLocationLogs() {
   };
 }
 
-function saveLocationStocks() {
-  localStorage.setItem(LOCATION_STOCKS_KEY, JSON.stringify(locationStocks));
+// ===================== Supabase Sync =====================
+
+// Shows a small dismissible toast (top-right) when a background save to
+// Supabase fails — the in-memory state and UI have already moved on
+// optimistically, so this is the user's only signal that a write didn't
+// reach the server and may need retrying.
+function showSyncError(message) {
+  const toast = document.createElement('div');
+  toast.className = 'sync-toast';
+  toast.textContent = message;
+  document.body.appendChild(toast);
+
+  requestAnimationFrame(() => toast.classList.add('visible'));
+
+  setTimeout(() => {
+    toast.classList.remove('visible');
+    setTimeout(() => toast.remove(), 300);
+  }, 6000);
 }
 
-function loadLocationStocks() {
-  const raw = localStorage.getItem(LOCATION_STOCKS_KEY);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
+function chunkArray(array, size) {
+  const chunks = [];
+  for (let i = 0; i < array.length; i += size) {
+    chunks.push(array.slice(i, i + size));
   }
+  return chunks;
 }
 
-function saveLocationLogs() {
-  localStorage.setItem(LOCATION_LOGS_KEY, JSON.stringify(locationLogs));
+// Fetches the full current state from Supabase and replaces the in-memory
+// itemsCatalog / locationStocks / locationLogs / warehouseRequests /
+// kitchenRequests with it. Called once on login (and from the manual
+// Refresh button) — every render function reads from these same variables,
+// so nothing else needs to change.
+async function loadAllDataFromSupabase() {
+  const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes] = await Promise.all([
+    supabaseClient.from('items').select('category, name'),
+    supabaseClient.from('stocks').select('location, item_name, qty'),
+    supabaseClient.from('logs').select('*'),
+    supabaseClient.from('warehouse_requests').select('*'),
+    supabaseClient.from('kitchen_requests').select('*'),
+  ]);
+
+  const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error;
+  if (error) throw error;
+
+  const catalog = { raw: [], processed: [] };
+  itemsRes.data.forEach((row) => {
+    if (catalog[row.category]) catalog[row.category].push(row.name);
+  });
+  itemsCatalog = catalog;
+
+  const stocks = buildDefaultLocationStocks();
+  stocksRes.data.forEach((row) => {
+    if (!stocks[row.location]) stocks[row.location] = {};
+    stocks[row.location][row.item_name] = Number(row.qty);
+  });
+  locationStocks = stocks;
+
+  const logs = buildDefaultLocationLogs();
+  logsRes.data.forEach((row) => {
+    if (!logs[row.location]) logs[row.location] = [];
+    const entry = {
+      timestamp: Number(row.ts),
+      item: row.item_name,
+      actionType: row.action_type,
+      qty: Number(row.qty),
+      category: row.category,
+    };
+    if (row.source) entry.source = row.source;
+    if (row.request_tag) entry.requestTag = row.request_tag;
+    logs[row.location].push(entry);
+  });
+  locationLogs = logs;
+
+  warehouseRequests = warehouseReqRes.data.map((row) => ({
+    id: row.id,
+    timestamp: Number(row.ts),
+    fromLocation: row.from_location,
+    item: row.item_name,
+    qty: Number(row.qty),
+    status: row.status,
+  }));
+
+  kitchenRequests = kitchenReqRes.data.map((row) => ({
+    id: row.id,
+    timestamp: Number(row.ts),
+    item: row.item_name,
+    qty: Number(row.qty),
+    status: row.status,
+  }));
 }
 
-function loadLocationLogs() {
-  const raw = localStorage.getItem(LOCATION_LOGS_KEY);
-  if (!raw) return null;
+// Each of these mirrors a single mutation already applied to the in-memory
+// state (optimistic UI) by writing just the changed row(s) to Supabase.
+// They're intentionally not awaited at most call sites — failures surface
+// via showSyncError without blocking the UI.
 
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
+async function upsertStocks(location, items) {
+  if (!items.length) return;
+  const rows = items.map(({ item, qty }) => ({ location, item_name: item, qty }));
+  const { error } = await supabaseClient.from('stocks').upsert(rows, { onConflict: 'location,item_name' });
+  if (error) showSyncError('Could not save stock change — check your connection.');
+}
+
+async function insertLogs(location, entries) {
+  if (!entries.length) return;
+  const rows = entries.map((entry) => ({
+    location,
+    ts: entry.timestamp,
+    item_name: entry.item,
+    action_type: entry.actionType,
+    qty: entry.qty,
+    category: entry.category || null,
+    source: entry.source || null,
+    request_tag: entry.requestTag || null,
+  }));
+  const { error } = await supabaseClient.from('logs').insert(rows);
+  if (error) showSyncError('Could not save activity log — check your connection.');
+}
+
+async function insertWarehouseRequests(requests) {
+  if (!requests.length) return;
+  const rows = requests.map((r) => ({
+    id: r.id, ts: r.timestamp, from_location: r.fromLocation, item_name: r.item, qty: r.qty, status: r.status,
+  }));
+  const { error } = await supabaseClient.from('warehouse_requests').insert(rows);
+  if (error) showSyncError('Could not submit request — check your connection.');
+}
+
+async function updateWarehouseRequests(requests) {
+  if (!requests.length) return;
+  const results = await Promise.all(requests.map((r) => (
+    supabaseClient.from('warehouse_requests').update({ status: r.status, qty: r.qty }).eq('id', r.id)
+  )));
+  if (results.some((r) => r.error)) showSyncError('Could not update request — check your connection.');
+}
+
+async function insertKitchenRequests(requests) {
+  if (!requests.length) return;
+  const rows = requests.map((r) => ({
+    id: r.id, ts: r.timestamp, item_name: r.item, qty: r.qty, status: r.status,
+  }));
+  const { error } = await supabaseClient.from('kitchen_requests').insert(rows);
+  if (error) showSyncError('Could not submit request — check your connection.');
+}
+
+async function updateKitchenRequests(requests) {
+  if (!requests.length) return;
+  const results = await Promise.all(requests.map((r) => (
+    supabaseClient.from('kitchen_requests').update({ status: r.status, qty: r.qty }).eq('id', r.id)
+  )));
+  if (results.some((r) => r.error)) showSyncError('Could not update request — check your connection.');
+}
+
+async function insertCatalogItem(category, name) {
+  const { error } = await supabaseClient.from('items').insert({ category, name });
+  if (error) showSyncError('Could not save new item — check your connection.');
+}
+
+async function deleteCatalogItem(category, name) {
+  const { error } = await supabaseClient.from('items').delete().eq('category', category).eq('name', name);
+  if (error) showSyncError('Could not remove item — check your connection.');
+}
+
+// Renaming a catalog item cascades across stocks, logs, and both request
+// queues (see renameItemEverywhere). mergedStocks carries the post-merge
+// quantity for every location that had stock under oldName, so those rows
+// can be upserted under newName before the oldName rows are deleted.
+async function renameCatalogItemEverywhere(category, oldName, newName, mergedStocks) {
+  const tasks = [
+    supabaseClient.from('items').update({ name: newName }).eq('category', category).eq('name', oldName),
+    supabaseClient.from('stocks').delete().eq('item_name', oldName),
+    supabaseClient.from('logs').update({ item_name: newName }).eq('item_name', oldName),
+    supabaseClient.from('warehouse_requests').update({ item_name: newName }).eq('item_name', oldName),
+    supabaseClient.from('kitchen_requests').update({ item_name: newName }).eq('item_name', oldName),
+  ];
+
+  if (mergedStocks.length) {
+    const rows = mergedStocks.map(({ location, qty }) => ({ location, item_name: newName, qty }));
+    tasks.push(supabaseClient.from('stocks').upsert(rows, { onConflict: 'location,item_name' }));
   }
+
+  const results = await Promise.all(tasks);
+  if (results.some((r) => r.error)) showSyncError('Could not fully rename item across all data — check your connection.');
 }
 
-function saveWarehouseRequests() {
-  localStorage.setItem(WAREHOUSE_REQUESTS_KEY, JSON.stringify(warehouseRequests));
+// ===================== One-time Local Data Migration =====================
+
+function openMigrateModal() {
+  migrateStatus.hidden = true;
+  migrateStatus.classList.remove('migrate-success');
+  migrateConfirmBtn.disabled = false;
+  migrateModal.hidden = false;
 }
 
-function loadWarehouseRequests() {
-  const raw = localStorage.getItem(WAREHOUSE_REQUESTS_KEY);
-  if (!raw) return null;
+function closeMigrateModal() {
+  migrateModal.hidden = true;
+}
+
+// Reads the old whole-blob localStorage data this app used before Supabase
+// and bulk-uploads it into the 5 Supabase tables. Intended to be run once,
+// from whichever device/browser holds the most up-to-date local data — it
+// upserts catalog/stock rows (overwriting any matching server rows) and
+// inserts/upserts logs and requests.
+async function handleMigrateConfirm() {
+  migrateConfirmBtn.disabled = true;
+  migrateStatus.hidden = false;
+  migrateStatus.classList.remove('migrate-success');
+  migrateStatus.textContent = 'Migrating...';
 
   try {
-    return JSON.parse(raw);
+    const oldCatalog = JSON.parse(localStorage.getItem(ITEMS_CATALOG_KEY) || 'null') || { raw: [], processed: [] };
+    const oldStocks = JSON.parse(localStorage.getItem(LOCATION_STOCKS_KEY) || 'null') || buildDefaultLocationStocks();
+    const oldLogs = JSON.parse(localStorage.getItem(LOCATION_LOGS_KEY) || 'null') || buildDefaultLocationLogs();
+    const oldWarehouseRequests = JSON.parse(localStorage.getItem(WAREHOUSE_REQUESTS_KEY) || 'null') || [];
+    const oldKitchenRequests = JSON.parse(localStorage.getItem(KITCHEN_REQUESTS_KEY) || 'null') || [];
+
+    const itemRows = [];
+    ITEM_CATEGORIES.forEach((category) => {
+      (oldCatalog[category.key] || []).forEach((name) => {
+        itemRows.push({ category: category.key, name });
+      });
+    });
+    if (itemRows.length) {
+      const { error } = await supabaseClient.from('items').upsert(itemRows, { onConflict: 'category,name' });
+      if (error) throw error;
+    }
+
+    const stockRows = [];
+    Object.entries(oldStocks).forEach(([location, items]) => {
+      Object.entries(items || {}).forEach(([item, qty]) => {
+        stockRows.push({ location, item_name: item, qty: Number(qty) });
+      });
+    });
+    if (stockRows.length) {
+      const { error } = await supabaseClient.from('stocks').upsert(stockRows, { onConflict: 'location,item_name' });
+      if (error) throw error;
+    }
+
+    const logRows = [];
+    Object.entries(oldLogs).forEach(([location, entries]) => {
+      (entries || []).forEach((entry) => {
+        logRows.push({
+          location,
+          ts: entry.timestamp,
+          item_name: entry.item,
+          action_type: entry.actionType,
+          qty: entry.qty,
+          category: entry.category || null,
+          source: entry.source || null,
+          request_tag: entry.requestTag || null,
+        });
+      });
+    });
+    for (const chunk of chunkArray(logRows, 500)) {
+      const { error } = await supabaseClient.from('logs').insert(chunk);
+      if (error) throw error;
+    }
+
+    if (oldWarehouseRequests.length) {
+      const rows = oldWarehouseRequests.map((r) => ({
+        id: r.id, ts: r.timestamp, from_location: r.fromLocation, item_name: r.item, qty: r.qty, status: r.status,
+      }));
+      for (const chunk of chunkArray(rows, 500)) {
+        const { error } = await supabaseClient.from('warehouse_requests').upsert(chunk, { onConflict: 'id' });
+        if (error) throw error;
+      }
+    }
+
+    if (oldKitchenRequests.length) {
+      const rows = oldKitchenRequests.map((r) => ({
+        id: r.id, ts: r.timestamp, item_name: r.item, qty: r.qty, status: r.status,
+      }));
+      for (const chunk of chunkArray(rows, 500)) {
+        const { error } = await supabaseClient.from('kitchen_requests').upsert(chunk, { onConflict: 'id' });
+        if (error) throw error;
+      }
+    }
+
+    await loadAllDataFromSupabase();
+    rerenderPreservingScroll();
+
+    migrateStatus.textContent = 'Migration complete!';
+    migrateStatus.classList.add('migrate-success');
+    migrateConfirmBtn.disabled = false;
   } catch (err) {
-    return null;
-  }
-}
-
-function saveKitchenRequests() {
-  localStorage.setItem(KITCHEN_REQUESTS_KEY, JSON.stringify(kitchenRequests));
-}
-
-function loadKitchenRequests() {
-  const raw = localStorage.getItem(KITCHEN_REQUESTS_KEY);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
+    migrateStatus.textContent = 'Migration failed — check your connection and try again.';
+    migrateConfirmBtn.disabled = false;
   }
 }
 
 // ===================== App Shell / Views =====================
 
-function enterApp(role) {
+async function enterApp(role) {
   loginScreen.style.display = 'none';
+
+  dataLoadingError.hidden = true;
+  dataLoadingRetryBtn.hidden = true;
+  dataLoadingStatus.hidden = false;
+  dataLoadingOverlay.hidden = false;
+
+  try {
+    await loadAllDataFromSupabase();
+  } catch (err) {
+    dataLoadingStatus.hidden = true;
+    dataLoadingError.hidden = false;
+    dataLoadingRetryBtn.hidden = false;
+    pendingLoginRole = role;
+    return;
+  }
+
+  dataLoadingOverlay.hidden = true;
   appShell.style.display = 'flex';
 
   loggedInRoleLabel.textContent = ROLE_LABELS[role] || role;
@@ -424,6 +665,9 @@ function getActiveLocationKey() {
 function renderItemsView() {
   viewContent.innerHTML = `
     <div class="items-dashboard">
+      ${getCurrentUserRole() === 'manager'
+        ? `<button type="button" id="migrate-data-btn" class="add-item-btn">Migrate Local Data to Supabase</button>`
+        : ''}
       ${ITEM_CATEGORIES.map((category) => `
         <section class="items-card">
           <h3 class="items-card-title">${category.label}</h3>
@@ -478,6 +722,9 @@ function renderItemsView() {
       filterCategoryRows(input);
     });
   });
+
+  const migrateBtn = viewContent.querySelector('#migrate-data-btn');
+  if (migrateBtn) migrateBtn.addEventListener('click', openMigrateModal);
 }
 
 function filterCategoryRows(searchInput) {
@@ -503,7 +750,7 @@ function handleAddItem(form) {
   if (isDuplicate) return;
 
   itemsCatalog[category].push(name);
-  saveItemsCatalog();
+  insertCatalogItem(category, name);
   renderView('items');
 }
 
@@ -561,8 +808,7 @@ function handleEditItemSave() {
   }
 
   itemsCatalog[category][index] = newName;
-  saveItemsCatalog();
-  renameItemEverywhere(oldName, newName);
+  renameItemEverywhere(category, oldName, newName);
   closeEditItemModal();
   renderView('items');
 }
@@ -570,31 +816,31 @@ function handleEditItemSave() {
 // Item names are stored as plain strings throughout locationStocks, locationLogs,
 // and both request queues — renaming a catalog entry must cascade everywhere so
 // existing stock and history don't get silently orphaned under the old name.
-function renameItemEverywhere(oldName, newName) {
-  Object.values(locationStocks).forEach((stock) => {
+function renameItemEverywhere(category, oldName, newName) {
+  const mergedStocks = [];
+  Object.entries(locationStocks).forEach(([location, stock]) => {
     if (Object.prototype.hasOwnProperty.call(stock, oldName)) {
       stock[newName] = (stock[newName] || 0) + stock[oldName];
       delete stock[oldName];
+      mergedStocks.push({ location, qty: stock[newName] });
     }
   });
-  saveLocationStocks();
 
   Object.values(locationLogs).forEach((logs) => {
     logs.forEach((log) => {
       if (log.item === oldName) log.item = newName;
     });
   });
-  saveLocationLogs();
 
   warehouseRequests.forEach((request) => {
     if (request.item === oldName) request.item = newName;
   });
-  saveWarehouseRequests();
 
   kitchenRequests.forEach((request) => {
     if (request.item === oldName) request.item = newName;
   });
-  saveKitchenRequests();
+
+  renameCatalogItemEverywhere(category, oldName, newName, mergedStocks);
 }
 
 function handleRemoveItem(category, index) {
@@ -615,8 +861,9 @@ function confirmRemoval() {
   if (!pendingRemoval) return;
 
   const { category, index } = pendingRemoval;
+  const itemName = itemsCatalog[category][index];
   itemsCatalog[category].splice(index, 1);
-  saveItemsCatalog();
+  deleteCatalogItem(category, itemName);
   closeConfirmDialog();
   renderView('items');
 }
@@ -810,7 +1057,9 @@ function handleDispatchAllRequests() {
     .sort((a, b) => a.timestamp - b.timestamp);
 
   const stock = locationStocks.warehouse;
-  let dispatchedAny = false;
+  const dispatchedRequests = [];
+  const stockChanges = new Map();
+  const newLogEntries = [];
 
   pendingRequests.forEach((request) => {
     const availableQty = stock[request.item] || 0;
@@ -823,8 +1072,9 @@ function handleDispatchAllRequests() {
     request.status = 'Dispatched';
 
     stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
+    stockChanges.set(request.item, stock[request.item]);
 
-    locationLogs.warehouse.push({
+    const logEntry = {
       timestamp: Date.now(),
       item: request.item,
       actionType: 'subtract',
@@ -833,16 +1083,18 @@ function handleDispatchAllRequests() {
       requestTag: isPartial
         ? `Partial dispatch to ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`
         : `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
-    });
+    };
+    locationLogs.warehouse.push(logEntry);
+    newLogEntries.push(logEntry);
 
-    dispatchedAny = true;
+    dispatchedRequests.push(request);
   });
 
-  if (!dispatchedAny) return;
+  if (!dispatchedRequests.length) return;
 
-  saveWarehouseRequests();
-  saveLocationStocks();
-  saveLocationLogs();
+  updateWarehouseRequests(dispatchedRequests);
+  upsertStocks('warehouse', Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs('warehouse', newLogEntries);
 
   rerenderPreservingScroll();
 }
@@ -859,23 +1111,10 @@ function renderKitchenSubtabContent() {
 
       <section class="request-form-card">
         <h3 class="request-form-title">Ask Kitchen for Processed Items</h3>
-        <form id="ask-kitchen-form" class="request-form">
-          <div class="stock-field">
-            <label for="kitchen-request-item-search" class="stock-field-label">Item</label>
-            <input type="text" id="kitchen-request-item-search" class="stock-item-search" placeholder="Search for a processed item..." autocomplete="off" />
-            <ul id="kitchen-request-item-suggestions" class="stock-item-suggestions" hidden></ul>
-          </div>
-          <div class="stock-field">
-            <label for="kitchen-request-qty-input" class="stock-field-label">Quantity</label>
-            <input type="number" id="kitchen-request-qty-input" class="request-qty-input" min="1" step="1" placeholder="0" />
-          </div>
-          <p id="ask-kitchen-form-error" class="stock-modal-error" hidden></p>
-          <div class="request-form-btns">
-            <button type="button" class="request-add-btn">Add Item</button>
-            <button type="submit" class="request-send-btn">Send Request</button>
-          </div>
-        </form>
-        ${buildRequestCartHtml(pendingKitchenRequestItems, 'kitchen-send-all-btn')}
+        <input type="text" class="warehouse-search-input request-items-search" placeholder="Search items..." autocomplete="off" />
+        ${buildRequestQtyTableHtml(locationStocks.kitchen, [{ key: 'processed', label: 'Processed Items' }])}
+        <p id="kitchen-request-form-error" class="stock-modal-error" hidden></p>
+        <button type="button" class="request-send-all-btn submit-kitchen-request-btn">Request Items</button>
       </section>
 
       <section class="requests-history">
@@ -910,33 +1149,12 @@ function renderKitchenSubtabContent() {
 
   wireIncomingRequestActionListeners(warehouseSubtabContent);
 
-  const askKitchenForm = warehouseSubtabContent.querySelector('#ask-kitchen-form');
-  askKitchenForm.addEventListener('submit', (event) => {
-    event.preventDefault();
-    handleSendSingleKitchenRequest(askKitchenForm);
-  });
+  const kitchenRequestFormCard = warehouseSubtabContent.querySelector('.request-form-card');
+  const kitchenRequestSearchInput = kitchenRequestFormCard.querySelector('.request-items-search');
+  kitchenRequestSearchInput.addEventListener('input', () => filterInventoryRows(kitchenRequestFormCard, kitchenRequestSearchInput));
 
-  askKitchenForm.querySelector('.request-add-btn').addEventListener('click', () => {
-    handleAddToKitchenCart(askKitchenForm);
-  });
-
-  setupItemSearchAutocomplete(
-    askKitchenForm.querySelector('#kitchen-request-item-search'),
-    askKitchenForm.querySelector('#kitchen-request-item-suggestions'),
-    () => itemsCatalog.processed,
-    () => hideRequestFormError(askKitchenForm)
-  );
-
-  const kitchenSendAllBtn = warehouseSubtabContent.querySelector('.kitchen-send-all-btn');
-  if (kitchenSendAllBtn) {
-    kitchenSendAllBtn.addEventListener('click', handleSendAllKitchenRequests);
-  }
-
-  warehouseSubtabContent.querySelectorAll('.request-cart-remove-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      pendingKitchenRequestItems.splice(Number(btn.dataset.index), 1);
-      renderKitchenSubtabContent();
-    });
+  kitchenRequestFormCard.querySelector('.submit-kitchen-request-btn').addEventListener('click', () => {
+    handleSubmitKitchenRequestTable(kitchenRequestFormCard);
   });
 }
 
@@ -963,21 +1181,22 @@ function handleDispatchRequest(requestId) {
   if (!request || request.status !== 'Pending') return;
 
   request.status = 'Dispatched';
-  saveWarehouseRequests();
+  updateWarehouseRequests([request]);
 
   const stock = locationStocks.warehouse;
   stock[request.item] = (stock[request.item] || 0) - request.qty;
-  saveLocationStocks();
+  upsertStocks('warehouse', [{ item: request.item, qty: stock[request.item] }]);
 
-  locationLogs.warehouse.push({
+  const logEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'subtract',
     qty: request.qty,
     category: getCurrentUserRole(),
     requestTag: `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
-  });
-  saveLocationLogs();
+  };
+  locationLogs.warehouse.push(logEntry);
+  insertLogs('warehouse', [logEntry]);
 
   rerenderPreservingScroll();
 }
@@ -987,7 +1206,7 @@ function handleRejectRequest(requestId) {
   if (!request || request.status !== 'Pending') return;
 
   request.status = 'Rejected';
-  saveWarehouseRequests();
+  updateWarehouseRequests([request]);
 
   rerenderPreservingScroll();
 }
@@ -1124,20 +1343,21 @@ function confirmPartialWarehouseDispatch() {
 
   request.qty = sendQty;
   request.status = 'Dispatched';
-  saveWarehouseRequests();
+  updateWarehouseRequests([request]);
 
   stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
-  saveLocationStocks();
+  upsertStocks('warehouse', [{ item: request.item, qty: stock[request.item] }]);
 
-  locationLogs.warehouse.push({
+  const logEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'subtract',
     qty: sendQty,
     category: getCurrentUserRole(),
     requestTag: `Partial dispatch to ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
-  });
-  saveLocationLogs();
+  };
+  locationLogs.warehouse.push(logEntry);
+  insertLogs('warehouse', [logEntry]);
 
   closePartialDispatchModal();
   rerenderPreservingScroll();
@@ -1166,29 +1386,33 @@ function confirmPartialKitchenDispatch() {
 
   request.qty = sendQty;
   request.status = 'Dispatched';
-  saveKitchenRequests();
+  updateKitchenRequests([request]);
 
   stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
   locationStocks.warehouse[request.item] = roundToTwoDecimals((locationStocks.warehouse[request.item] || 0) + sendQty);
-  saveLocationStocks();
+  upsertStocks('kitchen', [{ item: request.item, qty: stock[request.item] }]);
+  upsertStocks('warehouse', [{ item: request.item, qty: locationStocks.warehouse[request.item] }]);
 
-  locationLogs.kitchen.push({
+  const kitchenLogEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'subtract',
     qty: sendQty,
     category: getCurrentUserRole(),
     requestTag: 'Partial dispatch to Warehouse',
-  });
-  locationLogs.warehouse.push({
+  };
+  const warehouseLogEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'add',
     qty: sendQty,
     category: getCurrentUserRole(),
     requestTag: 'Partial receipt from Kitchen',
-  });
-  saveLocationLogs();
+  };
+  locationLogs.kitchen.push(kitchenLogEntry);
+  locationLogs.warehouse.push(warehouseLogEntry);
+  insertLogs('kitchen', [kitchenLogEntry]);
+  insertLogs('warehouse', [warehouseLogEntry]);
 
   closePartialDispatchModal();
   rerenderPreservingScroll();
@@ -1355,36 +1579,60 @@ function renderLocationSubtabContent(viewKey) {
 
 // ===================== Warehouse Requests (Shop / Kitchen side) =====================
 
-function buildRequestCartHtml(items, sendAllBtnClass) {
-  if (items.length === 0) return '';
-
-  const rows = items.map((entry, idx) => `
-    <div class="request-cart-row">
-      <span class="request-cart-item-name">${escapeHtml(entry.item)}</span>
-      <span class="request-cart-qty">× ${entry.qty}</span>
-      <button type="button" class="request-cart-remove-btn" data-index="${idx}" aria-label="Remove">✕</button>
-    </div>
-  `).join('');
-
-  const label = items.length === 1 ? '1 item' : `${items.length} items`;
+// Builds a scrollable "Item | Stock | Request Qty" table per item category,
+// mirroring the General Inventory batch-update layout. `stock` is the
+// requesting location's own stock (shown for context while deciding how much
+// to ask for).
+function buildRequestQtyTableHtml(stock, categories) {
+  const singleCategory = categories.length === 1 ? ' single-category' : '';
 
   return `
-    <div class="request-cart">
-      <div class="request-cart-list">${rows}</div>
-      <button type="button" class="request-send-btn ${sendAllBtnClass}">
-        Send Request (${label})
-      </button>
+    <div class="inventory-columns request-items-columns${singleCategory}">
+      ${categories.map((category) => `
+        <section class="inventory-column">
+          <h3 class="inventory-column-title">${category.label}</h3>
+          ${itemsCatalog[category.key].length
+            ? `<div class="inventory-table-wrap">
+                <table class="inventory-table">
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Stock</th>
+                      <th>Request Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${itemsCatalog[category.key].map((item) => `
+                      <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                        <td class="inventory-item-name">${escapeHtml(item)}</td>
+                        <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
+                        <td><input type="number" class="batch-qty-input request-qty-cell-input" min="0" step="any" placeholder="–" /></td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>`
+            : `<p class="empty-list-msg">No items in this category yet.</p>`}
+        </section>
+      `).join('')}
     </div>
   `;
 }
 
-function renderWarehouseRequestsPanel(container, locationKey) {
-  // Reset cart if user switched to a different location
-  if (pendingRequestLocation !== locationKey) {
-    pendingRequestItems = [];
-    pendingRequestLocation = locationKey;
-  }
+// Reads every "Request Qty" input inside a request-form-card and returns the
+// items with a positive quantity entered.
+function collectRequestQtyEntries(formCard) {
+  const entries = [];
+  formCard.querySelectorAll('.inventory-row').forEach((row) => {
+    const qty = Number(row.querySelector('.request-qty-cell-input').value);
+    if (Number.isFinite(qty) && qty > 0) {
+      entries.push({ item: row.dataset.item, qty });
+    }
+  });
+  return entries;
+}
 
+function renderWarehouseRequestsPanel(container, locationKey) {
   const requests = warehouseRequests
     .filter((request) => request.fromLocation === locationKey)
     .sort((a, b) => b.timestamp - a.timestamp);
@@ -1393,23 +1641,10 @@ function renderWarehouseRequestsPanel(container, locationKey) {
     <div class="warehouse-requests">
       <section class="request-form-card">
         <h3 class="request-form-title">Submit Request to Warehouse</h3>
-        <form id="warehouse-request-form" class="request-form">
-          <div class="stock-field">
-            <label for="request-item-search" class="stock-field-label">Item</label>
-            <input type="text" id="request-item-search" class="stock-item-search" placeholder="Search for an item..." autocomplete="off" />
-            <ul id="request-item-suggestions" class="stock-item-suggestions" hidden></ul>
-          </div>
-          <div class="stock-field">
-            <label for="request-qty-input" class="stock-field-label">Quantity</label>
-            <input type="number" id="request-qty-input" class="request-qty-input" min="1" step="1" placeholder="0" />
-          </div>
-          <p id="request-form-error" class="stock-modal-error" hidden></p>
-          <div class="request-form-btns">
-            <button type="button" class="request-add-btn">Add Item</button>
-            <button type="submit" class="request-send-btn">Send Request</button>
-          </div>
-        </form>
-        ${buildRequestCartHtml(pendingRequestItems, 'request-send-all-btn')}
+        <input type="text" class="warehouse-search-input request-items-search" placeholder="Search items..." autocomplete="off" />
+        ${buildRequestQtyTableHtml(locationStocks[locationKey], ITEM_CATEGORIES)}
+        <p id="warehouse-request-form-error" class="stock-modal-error" hidden></p>
+        <button type="button" class="request-send-all-btn submit-warehouse-request-btn">Request Items</button>
       </section>
 
       <section class="requests-history">
@@ -1448,33 +1683,12 @@ function renderWarehouseRequestsPanel(container, locationKey) {
     </div>
   `;
 
-  const form = container.querySelector('#warehouse-request-form');
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    handleSendSingleWarehouseRequest(form, locationKey);
-  });
+  const requestFormCard = container.querySelector('.request-form-card');
+  const requestSearchInput = requestFormCard.querySelector('.request-items-search');
+  requestSearchInput.addEventListener('input', () => filterInventoryRows(requestFormCard, requestSearchInput));
 
-  form.querySelector('.request-add-btn').addEventListener('click', () => {
-    handleAddToRequestCart(form, locationKey, container);
-  });
-
-  setupItemSearchAutocomplete(
-    form.querySelector('#request-item-search'),
-    form.querySelector('#request-item-suggestions'),
-    getCatalogItemNames,
-    () => hideRequestFormError(form)
-  );
-
-  const sendAllBtn = container.querySelector('.request-send-all-btn');
-  if (sendAllBtn) {
-    sendAllBtn.addEventListener('click', () => handleSendAllWarehouseRequests(locationKey));
-  }
-
-  container.querySelectorAll('.request-cart-remove-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      pendingRequestItems.splice(Number(btn.dataset.index), 1);
-      renderWarehouseRequestsPanel(container, locationKey);
-    });
+  requestFormCard.querySelector('.submit-warehouse-request-btn').addEventListener('click', () => {
+    handleSubmitWarehouseRequestTable(requestFormCard, locationKey);
   });
 
   container.querySelectorAll('.mark-received-btn').forEach((btn) => {
@@ -1560,100 +1774,31 @@ function buildIncomingWarehouseRequestsSectionHtml() {
   `;
 }
 
-function showRequestFormError(form, message) {
-  const errorEl = form.querySelector('.stock-modal-error');
-  errorEl.textContent = message;
-  errorEl.hidden = false;
-}
+// Reads the "Request Qty" table inside the Submit Request to Warehouse card
+// and queues a Pending request for every item with a quantity entered.
+function handleSubmitWarehouseRequestTable(formCard, locationKey) {
+  const errorEl = formCard.querySelector('#warehouse-request-form-error');
+  const entries = collectRequestQtyEntries(formCard);
 
-function hideRequestFormError(form) {
-  const errorEl = form.querySelector('.stock-modal-error');
+  if (entries.length === 0) {
+    errorEl.textContent = 'Enter a quantity for at least one item.';
+    errorEl.hidden = false;
+    return;
+  }
+
   errorEl.hidden = true;
-  errorEl.textContent = '';
-}
-
-function handleAddToRequestCart(form, locationKey, container) {
-  const itemSearchInput = form.querySelector('#request-item-search');
-  const qtyInput = form.querySelector('#request-qty-input');
-
-  const itemName = findCatalogItemByName(itemSearchInput.value);
-  const quantity = Number(qtyInput.value);
-
-  hideRequestFormError(form);
-
-  if (!itemName) {
-    showRequestFormError(form, 'Please select a valid item from the catalog.');
-    return;
-  }
-
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    showRequestFormError(form, 'Please enter a quantity greater than zero.');
-    return;
-  }
-
-  const existing = pendingRequestItems.find((entry) => entry.item === itemName);
-  if (existing) {
-    existing.qty += quantity;
-  } else {
-    pendingRequestItems.push({ item: itemName, qty: quantity });
-  }
-
-  // Re-render the panel to show the updated cart, then focus the item field
-  // so the user can immediately search for the next item.
-  renderWarehouseRequestsPanel(container, locationKey);
-  container.querySelector('#request-item-search')?.focus();
-}
-
-function handleSendSingleWarehouseRequest(form, locationKey) {
-  const itemSearchInput = form.querySelector('#request-item-search');
-  const qtyInput = form.querySelector('#request-qty-input');
-
-  const itemName = findCatalogItemByName(itemSearchInput.value);
-  const quantity = Number(qtyInput.value);
-
-  hideRequestFormError(form);
-
-  if (!itemName) {
-    showRequestFormError(form, 'Please select a valid item from the catalog.');
-    return;
-  }
-
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    showRequestFormError(form, 'Please enter a quantity greater than zero.');
-    return;
-  }
-
-  warehouseRequests.push({
-    id: Date.now(),
-    timestamp: Date.now(),
-    fromLocation: locationKey,
-    item: itemName,
-    qty: quantity,
-    status: 'Pending',
-  });
-  saveWarehouseRequests();
-
-  renderView(currentViewKey);
-}
-
-function handleSendAllWarehouseRequests(locationKey) {
-  if (pendingRequestItems.length === 0) return;
 
   const now = Date.now();
-  pendingRequestItems.forEach((entry, idx) => {
-    warehouseRequests.push({
-      id: now + idx,
-      timestamp: now + idx,
-      fromLocation: locationKey,
-      item: entry.item,
-      qty: entry.qty,
-      status: 'Pending',
-    });
-  });
-  saveWarehouseRequests();
-
-  pendingRequestItems = [];
-  pendingRequestLocation = null;
+  const newRequests = entries.map((entry, idx) => ({
+    id: now + idx,
+    timestamp: now + idx,
+    fromLocation: locationKey,
+    item: entry.item,
+    qty: entry.qty,
+    status: 'Pending',
+  }));
+  warehouseRequests.push(...newRequests);
+  insertWarehouseRequests(newRequests);
 
   renderView(currentViewKey);
 }
@@ -1663,97 +1808,52 @@ function handleMarkRequestReceived(requestId) {
   if (!request || request.status !== 'Dispatched') return;
 
   request.status = 'Received';
-  saveWarehouseRequests();
+  updateWarehouseRequests([request]);
 
   const stock = locationStocks[request.fromLocation];
   stock[request.item] = (stock[request.item] || 0) + request.qty;
-  saveLocationStocks();
+  upsertStocks(request.fromLocation, [{ item: request.item, qty: stock[request.item] }]);
 
-  locationLogs[request.fromLocation].push({
+  const logEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'add',
     qty: request.qty,
     category: getCurrentUserRole(),
     requestTag: 'Warehouse Request',
-  });
-  saveLocationLogs();
+  };
+  locationLogs[request.fromLocation].push(logEntry);
+  insertLogs(request.fromLocation, [logEntry]);
 
   rerenderPreservingScroll();
 }
 
-function validateKitchenRequestForm(form) {
-  const itemName = findItemInList(
-    form.querySelector('#kitchen-request-item-search').value,
-    itemsCatalog.processed
-  );
-  const quantity = Number(form.querySelector('#kitchen-request-qty-input').value);
+// Reads the "Request Qty" table inside the Ask Kitchen for Processed Items
+// card and queues a Pending request for every item with a quantity entered.
+function handleSubmitKitchenRequestTable(formCard) {
+  const errorEl = formCard.querySelector('#kitchen-request-form-error');
+  const entries = collectRequestQtyEntries(formCard);
 
-  hideRequestFormError(form);
-
-  if (!itemName) {
-    showRequestFormError(form, 'Please select a valid processed item.');
-    return null;
-  }
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    showRequestFormError(form, 'Please enter a quantity greater than zero.');
-    return null;
-  }
-  return { itemName, quantity };
-}
-
-function handleSendSingleKitchenRequest(form) {
-  const result = validateKitchenRequestForm(form);
-  if (!result) return;
-
-  kitchenRequests.push({
-    id: Date.now(),
-    timestamp: Date.now(),
-    item: result.itemName,
-    qty: result.quantity,
-    status: 'Pending',
-  });
-  saveKitchenRequests();
-  renderView(currentViewKey);
-}
-
-function handleAddToKitchenCart(form) {
-  const result = validateKitchenRequestForm(form);
-  if (!result) return;
-
-  const existing = pendingKitchenRequestItems.find((e) => e.item === result.itemName);
-  if (existing) {
-    existing.qty += result.quantity;
-  } else {
-    pendingKitchenRequestItems.push({ item: result.itemName, qty: result.quantity });
+  if (entries.length === 0) {
+    errorEl.textContent = 'Enter a quantity for at least one item.';
+    errorEl.hidden = false;
+    return;
   }
 
-  renderKitchenSubtabContent();
-  warehouseSubtabContent.querySelector('#kitchen-request-item-search')?.focus();
-}
-
-function handleSendAllKitchenRequests() {
-  if (pendingKitchenRequestItems.length === 0) return;
+  errorEl.hidden = true;
 
   const now = Date.now();
-  pendingKitchenRequestItems.forEach((entry, idx) => {
-    kitchenRequests.push({
-      id: now + idx,
-      timestamp: now + idx,
-      item: entry.item,
-      qty: entry.qty,
-      status: 'Pending',
-    });
-  });
-  saveKitchenRequests();
+  const newRequests = entries.map((entry, idx) => ({
+    id: now + idx,
+    timestamp: now + idx,
+    item: entry.item,
+    qty: entry.qty,
+    status: 'Pending',
+  }));
+  kitchenRequests.push(...newRequests);
+  insertKitchenRequests(newRequests);
 
-  pendingKitchenRequestItems = [];
   renderView(currentViewKey);
-}
-
-// kept for any legacy call sites
-function handleSendKitchenRequest(form) {
-  handleSendSingleKitchenRequest(form);
 }
 
 function handleDispatchKitchenRequest(requestId) {
@@ -1764,30 +1864,33 @@ function handleDispatchKitchenRequest(requestId) {
   const availableQty = kitchenStock[request.item] || 0;
 
   request.status = 'Dispatched';
-  saveKitchenRequests();
+  updateKitchenRequests([request]);
 
   kitchenStock[request.item] = availableQty - request.qty;
   locationStocks.warehouse[request.item] = (locationStocks.warehouse[request.item] || 0) + request.qty;
-  saveLocationStocks();
+  upsertStocks('kitchen', [{ item: request.item, qty: kitchenStock[request.item] }]);
+  upsertStocks('warehouse', [{ item: request.item, qty: locationStocks.warehouse[request.item] }]);
 
-  locationLogs.kitchen.push({
+  const kitchenLogEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'subtract',
     qty: request.qty,
     category: getCurrentUserRole(),
     requestTag: 'Dispatched to Warehouse',
-  });
-
-  locationLogs.warehouse.push({
+  };
+  const warehouseLogEntry = {
     timestamp: Date.now(),
     item: request.item,
     actionType: 'add',
     qty: request.qty,
     category: getCurrentUserRole(),
     requestTag: 'Received from Kitchen',
-  });
-  saveLocationLogs();
+  };
+  locationLogs.kitchen.push(kitchenLogEntry);
+  locationLogs.warehouse.push(warehouseLogEntry);
+  insertLogs('kitchen', [kitchenLogEntry]);
+  insertLogs('warehouse', [warehouseLogEntry]);
 
   rerenderPreservingScroll();
 }
@@ -1797,7 +1900,7 @@ function handleRejectKitchenRequest(requestId) {
   if (!request || request.status !== 'Pending') return;
 
   request.status = 'Rejected';
-  saveKitchenRequests();
+  updateKitchenRequests([request]);
 
   rerenderPreservingScroll();
 }
@@ -1821,61 +1924,6 @@ function findItemInList(name, list) {
 // floating-point noise like 1.1999999999999997.
 function roundToTwoDecimals(value) {
   return Math.round(value * 100) / 100;
-}
-
-// Wires a text input + suggestions <ul> into a "type to filter" autocomplete:
-// matches are items whose name starts with the typed text, refreshed on every
-// keystroke/focus and clickable to fill the input. `getItems` is a function so
-// the list can stay live (e.g. itemsCatalog.processed can grow between renders).
-function setupItemSearchAutocomplete(input, suggestionsList, getItems, onChange) {
-  function hideSuggestions() {
-    suggestionsList.innerHTML = '';
-    suggestionsList.hidden = true;
-  }
-
-  function renderSuggestions(query) {
-    const normalized = query.trim().toLowerCase();
-    const items = getItems();
-    const matches = normalized
-      ? items.filter((item) => item.toLowerCase().startsWith(normalized))
-      : items;
-
-    if (!matches.length) {
-      hideSuggestions();
-      return;
-    }
-
-    suggestionsList.innerHTML = matches
-      .map((item) => `<li class="stock-suggestion-item" data-item="${escapeHtml(item)}">${escapeHtml(item)}</li>`)
-      .join('');
-    suggestionsList.hidden = false;
-  }
-
-  input.addEventListener('input', () => {
-    if (onChange) onChange();
-    renderSuggestions(input.value);
-  });
-
-  input.addEventListener('focus', () => {
-    renderSuggestions(input.value);
-  });
-
-  input.addEventListener('blur', () => {
-    setTimeout(hideSuggestions, 120);
-  });
-
-  suggestionsList.addEventListener('mousedown', (event) => {
-    event.preventDefault();
-  });
-
-  suggestionsList.addEventListener('click', (event) => {
-    const suggestion = event.target.closest('.stock-suggestion-item');
-    if (!suggestion) return;
-
-    input.value = suggestion.dataset.item;
-    hideSuggestions();
-    if (onChange) onChange();
-  });
 }
 
 function getCurrentUserRole() {
@@ -1965,7 +2013,7 @@ function handleStockSave() {
   stock[itemName] = actionType === 'add'
     ? currentQty + quantity
     : currentQty - quantity;
-  saveLocationStocks();
+  upsertStocks(locationKey, [{ item: itemName, qty: stock[itemName] }]);
 
   const logEntry = {
     timestamp: Date.now(),
@@ -1976,7 +2024,7 @@ function handleStockSave() {
   };
   if (source) logEntry.source = source;
   locationLogs[locationKey].push(logEntry);
-  saveLocationLogs();
+  insertLogs(locationKey, [logEntry]);
 
   closeStockModal();
   renderView(currentViewKey);
@@ -2257,11 +2305,15 @@ function applyBatchUpdate(source) {
   const stock = locationStocks[locationKey];
   const now = Date.now();
 
+  const stockChanges = new Map();
+  const newLogEntries = [];
+
   changes.forEach((change, idx) => {
     const currentQty = stock[change.item] || 0;
     stock[change.item] = change.actionType === 'add'
       ? roundToTwoDecimals(currentQty + change.qty)
       : roundToTwoDecimals(currentQty - change.qty);
+    stockChanges.set(change.item, stock[change.item]);
 
     const logEntry = {
       timestamp: now + idx,
@@ -2272,10 +2324,11 @@ function applyBatchUpdate(source) {
     };
     if (source) logEntry.source = source;
     locationLogs[locationKey].push(logEntry);
+    newLogEntries.push(logEntry);
   });
 
-  saveLocationStocks();
-  saveLocationLogs();
+  upsertStocks(locationKey, Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs(locationKey, newLogEntries);
   pendingBatchUpdate = null;
   renderView(currentViewKey);
 }
@@ -2401,6 +2454,25 @@ stockItemSuggestions.addEventListener('click', (event) => {
 });
 
 logoutBtn.addEventListener('click', logout);
+
+dataLoadingRetryBtn.addEventListener('click', () => {
+  if (pendingLoginRole) enterApp(pendingLoginRole);
+});
+
+migrateCancelBtn.addEventListener('click', closeMigrateModal);
+migrateConfirmBtn.addEventListener('click', handleMigrateConfirm);
+
+refreshDataBtn.addEventListener('click', async () => {
+  refreshDataBtn.disabled = true;
+  try {
+    await loadAllDataFromSupabase();
+    rerenderPreservingScroll();
+  } catch (err) {
+    showSyncError('Could not refresh data — check your connection.');
+  } finally {
+    refreshDataBtn.disabled = false;
+  }
+});
 
 navButtons.forEach((btn) => {
   btn.addEventListener('click', () => {

@@ -109,6 +109,7 @@
 
       <div class="user-profile-card">
         <span class="user-role-label" id="logged-in-role">Role</span>
+        <button id="refresh-data-btn" class="refresh-data-btn" title="Refresh data">⟳</button>
         <button id="logout-btn" class="logout-btn">Logout</button>
       </div>
     </nav>
@@ -143,6 +144,15 @@
       </div>
     </main>
 
+  </div>
+
+  <!-- Data Loading Overlay (shown while fetching from Supabase on login / refresh) -->
+  <div id="data-loading-overlay" class="pin-overlay" hidden>
+    <div class="pin-modal">
+      <p id="data-loading-status" class="pin-role-label">Loading data...</p>
+      <p id="data-loading-error" class="pin-error" hidden>Could not load data. Check your connection and try again.</p>
+      <button id="data-loading-retry-btn" class="pin-cancel-btn" hidden>Retry</button>
+    </div>
   </div>
 
   <!-- Remove-Item Confirmation Dialog -->
@@ -259,6 +269,20 @@
     </div>
   </div>
 
+  <!-- One-time Local Data Migration Modal -->
+  <div id="migrate-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Migrate Local Data to Supabase</h3>
+      <p class="partial-dispatch-info">This reads the data currently stored in this browser and uploads it to Supabase. Only do this once, from the device with the most up-to-date data — it will overwrite matching records on the server.</p>
+      <p id="migrate-status" class="stock-modal-error" hidden></p>
+      <div class="confirm-actions">
+        <button id="migrate-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="migrate-confirm-btn" class="stock-save-btn">Migrate</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="app.js"></script>
 </body>
 </html>
