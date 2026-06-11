@@ -40,11 +40,6 @@ const ROLE_ACCESS = {
 };
 
 const SESSION_KEY = 'puchkasInventorySession';
-const ITEMS_CATALOG_KEY = 'puchkasItemsCatalog';
-const LOCATION_STOCKS_KEY = 'puchkasLocationStocks';
-const LOCATION_LOGS_KEY = 'puchkasLocationLogs';
-const WAREHOUSE_REQUESTS_KEY = 'puchkasWarehouseRequests';
-const KITCHEN_REQUESTS_KEY = 'puchkasKitchenRequests';
 
 // ===================== State =====================
 
@@ -163,11 +158,6 @@ const batchSourceCancelBtn = document.getElementById('batch-source-cancel-btn');
 
 const hamburgerBtn = document.getElementById('hamburger-btn');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
-
-const migrateModal = document.getElementById('migrate-modal');
-const migrateStatus = document.getElementById('migrate-status');
-const migrateCancelBtn = document.getElementById('migrate-cancel-btn');
-const migrateConfirmBtn = document.getElementById('migrate-confirm-btn');
 
 // ===================== PIN Pad =====================
 
@@ -298,14 +288,6 @@ function showSyncError(message) {
     toast.classList.remove('visible');
     setTimeout(() => toast.remove(), 300);
   }, 6000);
-}
-
-function chunkArray(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
 }
 
 // Fetches the full current state from Supabase and replaces the in-memory
@@ -498,111 +480,6 @@ async function renameCatalogItemEverywhere(category, oldName, newName, mergedSto
   if (results.some((r) => r.error)) showSyncError('Could not fully rename item across all data — check your connection.');
 }
 
-// ===================== One-time Local Data Migration =====================
-
-function openMigrateModal() {
-  migrateStatus.hidden = true;
-  migrateStatus.classList.remove('migrate-success');
-  migrateConfirmBtn.disabled = false;
-  migrateModal.hidden = false;
-}
-
-function closeMigrateModal() {
-  migrateModal.hidden = true;
-}
-
-// Reads the old whole-blob localStorage data this app used before Supabase
-// and bulk-uploads it into the 5 Supabase tables. Intended to be run once,
-// from whichever device/browser holds the most up-to-date local data — it
-// upserts catalog/stock rows (overwriting any matching server rows) and
-// inserts/upserts logs and requests.
-async function handleMigrateConfirm() {
-  migrateConfirmBtn.disabled = true;
-  migrateStatus.hidden = false;
-  migrateStatus.classList.remove('migrate-success');
-  migrateStatus.textContent = 'Migrating...';
-
-  try {
-    const oldCatalog = JSON.parse(localStorage.getItem(ITEMS_CATALOG_KEY) || 'null') || { raw: [], processed: [] };
-    const oldStocks = JSON.parse(localStorage.getItem(LOCATION_STOCKS_KEY) || 'null') || buildDefaultLocationStocks();
-    const oldLogs = JSON.parse(localStorage.getItem(LOCATION_LOGS_KEY) || 'null') || buildDefaultLocationLogs();
-    const oldWarehouseRequests = JSON.parse(localStorage.getItem(WAREHOUSE_REQUESTS_KEY) || 'null') || [];
-    const oldKitchenRequests = JSON.parse(localStorage.getItem(KITCHEN_REQUESTS_KEY) || 'null') || [];
-
-    const itemRows = [];
-    ITEM_CATEGORIES.forEach((category) => {
-      (oldCatalog[category.key] || []).forEach((name) => {
-        itemRows.push({ category: category.key, name });
-      });
-    });
-    if (itemRows.length) {
-      const { error } = await supabaseClient.from('items').upsert(itemRows, { onConflict: 'category,name' });
-      if (error) throw error;
-    }
-
-    const stockRows = [];
-    Object.entries(oldStocks).forEach(([location, items]) => {
-      Object.entries(items || {}).forEach(([item, qty]) => {
-        stockRows.push({ location, item_name: item, qty: Number(qty) });
-      });
-    });
-    if (stockRows.length) {
-      const { error } = await supabaseClient.from('stocks').upsert(stockRows, { onConflict: 'location,item_name' });
-      if (error) throw error;
-    }
-
-    const logRows = [];
-    Object.entries(oldLogs).forEach(([location, entries]) => {
-      (entries || []).forEach((entry) => {
-        logRows.push({
-          location,
-          ts: entry.timestamp,
-          item_name: entry.item,
-          action_type: entry.actionType,
-          qty: entry.qty,
-          category: entry.category || null,
-          source: entry.source || null,
-          request_tag: entry.requestTag || null,
-        });
-      });
-    });
-    for (const chunk of chunkArray(logRows, 500)) {
-      const { error } = await supabaseClient.from('logs').insert(chunk);
-      if (error) throw error;
-    }
-
-    if (oldWarehouseRequests.length) {
-      const rows = oldWarehouseRequests.map((r) => ({
-        id: r.id, ts: r.timestamp, from_location: r.fromLocation, item_name: r.item, qty: r.qty, status: r.status,
-      }));
-      for (const chunk of chunkArray(rows, 500)) {
-        const { error } = await supabaseClient.from('warehouse_requests').upsert(chunk, { onConflict: 'id' });
-        if (error) throw error;
-      }
-    }
-
-    if (oldKitchenRequests.length) {
-      const rows = oldKitchenRequests.map((r) => ({
-        id: r.id, ts: r.timestamp, item_name: r.item, qty: r.qty, status: r.status,
-      }));
-      for (const chunk of chunkArray(rows, 500)) {
-        const { error } = await supabaseClient.from('kitchen_requests').upsert(chunk, { onConflict: 'id' });
-        if (error) throw error;
-      }
-    }
-
-    await loadAllDataFromSupabase();
-    rerenderPreservingScroll();
-
-    migrateStatus.textContent = 'Migration complete!';
-    migrateStatus.classList.add('migrate-success');
-    migrateConfirmBtn.disabled = false;
-  } catch (err) {
-    migrateStatus.textContent = 'Migration failed — check your connection and try again.';
-    migrateConfirmBtn.disabled = false;
-  }
-}
-
 // ===================== App Shell / Views =====================
 
 async function enterApp(role) {
@@ -711,9 +588,6 @@ function getActiveLocationKey() {
 function renderItemsView() {
   viewContent.innerHTML = `
     <div class="items-dashboard">
-      ${getCurrentUserRole() === 'manager'
-        ? `<button type="button" id="migrate-data-btn" class="add-item-btn">Migrate Local Data to Supabase</button>`
-        : ''}
       ${ITEM_CATEGORIES.map((category) => `
         <section class="items-card">
           <h3 class="items-card-title">${category.label}</h3>
@@ -768,9 +642,6 @@ function renderItemsView() {
       filterCategoryRows(input);
     });
   });
-
-  const migrateBtn = viewContent.querySelector('#migrate-data-btn');
-  if (migrateBtn) migrateBtn.addEventListener('click', openMigrateModal);
 }
 
 function filterCategoryRows(searchInput) {
@@ -2713,9 +2584,6 @@ logoutBtn.addEventListener('click', logout);
 dataLoadingRetryBtn.addEventListener('click', () => {
   if (pendingLoginRole) enterApp(pendingLoginRole);
 });
-
-migrateCancelBtn.addEventListener('click', closeMigrateModal);
-migrateConfirmBtn.addEventListener('click', handleMigrateConfirm);
 
 refreshDataBtn.addEventListener('click', async () => {
   refreshDataBtn.disabled = true;

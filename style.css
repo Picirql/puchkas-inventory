@@ -1561,11 +1561,6 @@ button {
   transform: translateY(0);
 }
 
-/* ----- Migration Tool ----- */
-.migrate-success {
-  color: #4ade80;
-}
-
 /* ----- Mobile (<= 768px) ----- */
 @media (max-width: 768px) {
   .inventory-columns {

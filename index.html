@@ -269,19 +269,6 @@
     </div>
   </div>
 
-  <!-- One-time Local Data Migration Modal -->
-  <div id="migrate-modal" class="pin-overlay" hidden>
-    <div class="pin-modal stock-modal">
-      <h3 class="stock-modal-title">Migrate Local Data to Supabase</h3>
-      <p class="partial-dispatch-info">This reads the data currently stored in this browser and uploads it to Supabase. Only do this once, from the device with the most up-to-date data — it will overwrite matching records on the server.</p>
-      <p id="migrate-status" class="stock-modal-error" hidden></p>
-      <div class="confirm-actions">
-        <button id="migrate-cancel-btn" class="pin-cancel-btn">Cancel</button>
-        <button id="migrate-confirm-btn" class="stock-save-btn">Migrate</button>
-      </div>
-    </div>
-  </div>
-
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="app.js"></script>
 </body>
