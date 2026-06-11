@@ -82,6 +82,20 @@ let warehouseRequests = [];
 // Elements: { id, timestamp, item, qty, status: 'Pending' | 'Dispatched' | 'Rejected' }
 let kitchenRequests = [];
 
+// Per-location list of past days' archived logs: { id, archive_date }.
+// Populated from the log_archives table — a daily job clears out `logs` and
+// the request tables (see Supabase SQL setup) and stores that day's log
+// history here as downloadable text. Content is fetched on demand when the
+// user clicks Download, not held in memory for every archive.
+let logArchives = buildDefaultLocationLogs();
+
+// Per-location list of finished monthly inventory CSV sheets: { id, sheetMonth }.
+// Populated from the inventory_sheets table — generated client-side once a
+// month is complete (see ensurePreviousMonthSheets) from daily_item_activity /
+// daily_stock_snapshots, and kept for 3 months. Content is fetched on demand
+// when the user clicks Download.
+let inventorySheets = buildDefaultLocationLogs();
+
 // ===================== DOM References =====================
 
 const loginScreen = document.getElementById('login-screen');
@@ -300,15 +314,17 @@ function chunkArray(array, size) {
 // Refresh button) — every render function reads from these same variables,
 // so nothing else needs to change.
 async function loadAllDataFromSupabase() {
-  const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes] = await Promise.all([
+  const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes, archivesRes, sheetsRes] = await Promise.all([
     supabaseClient.from('items').select('category, name'),
     supabaseClient.from('stocks').select('location, item_name, qty'),
     supabaseClient.from('logs').select('*'),
     supabaseClient.from('warehouse_requests').select('*'),
     supabaseClient.from('kitchen_requests').select('*'),
+    supabaseClient.from('log_archives').select('id, location, archive_date').order('archive_date', { ascending: false }),
+    supabaseClient.from('inventory_sheets').select('id, location, sheet_month').order('sheet_month', { ascending: false }),
   ]);
 
-  const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error;
+  const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error || archivesRes.error || sheetsRes.error;
   if (error) throw error;
 
   const catalog = { raw: [], processed: [] };
@@ -356,6 +372,36 @@ async function loadAllDataFromSupabase() {
     qty: Number(row.qty),
     status: row.status,
   }));
+
+  const archives = buildDefaultLocationLogs();
+  archivesRes.data.forEach((row) => {
+    if (!archives[row.location]) archives[row.location] = [];
+    archives[row.location].push({ id: row.id, archiveDate: row.archive_date });
+  });
+  logArchives = archives;
+
+  const sheets = buildDefaultLocationLogs();
+  sheetsRes.data.forEach((row) => {
+    if (!sheets[row.location]) sheets[row.location] = [];
+    sheets[row.location].push({ id: row.id, sheetMonth: row.sheet_month });
+  });
+  inventorySheets = sheets;
+
+  ensurePreviousMonthSheets().then((changed) => {
+    if (changed) rerenderPreservingScroll();
+  });
+}
+
+// Fetches one archived day's log text on demand (the listing in
+// loadAllDataFromSupabase only carries the date, not the full content) and
+// triggers a download in the same .txt format as "Export Logs".
+async function downloadLogArchive(id, location, archiveDate) {
+  const { data, error } = await supabaseClient.from('log_archives').select('content').eq('id', id).single();
+  if (error || !data) {
+    showSyncError('Could not download archive — check your connection.');
+    return;
+  }
+  downloadTextFile(`puchkas-inventory-logs-${location}-${archiveDate}.txt`, data.content, 'text/plain;charset=utf-8;');
 }
 
 // Each of these mirrors a single mutation already applied to the in-memory
@@ -1431,7 +1477,6 @@ function renderInventoryDashboard(container, locationKey) {
       <div class="warehouse-toolbar">
         <input type="text" class="warehouse-search-input" placeholder="Search items..." autocomplete="off" />
         <div class="warehouse-toolbar-actions">
-          <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-csv">Export Excel (CSV)</button>
           <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-logs">Export Logs (TXT)</button>
         </div>
       </div>
@@ -1478,18 +1523,99 @@ function renderInventoryDashboard(container, locationKey) {
         <h3 class="inventory-log-title">Log Update History</h3>
         ${renderLogFeedHtml()}
       </section>
+
+      <section class="inventory-log-feed">
+        <h3 class="inventory-log-title">Archived Daily Logs</h3>
+        ${renderArchivedLogsHtml(locationKey)}
+      </section>
+
+      <section class="inventory-log-feed">
+        <h3 class="inventory-log-title">Monthly Inventory Sheets</h3>
+        ${renderInventorySheetsHtml(locationKey)}
+      </section>
     </div>
   `;
 
   const searchInput = container.querySelector('.warehouse-search-input');
   searchInput.addEventListener('input', () => filterInventoryRows(container, searchInput));
 
-  container.querySelector('[data-inventory-action="export-csv"]').addEventListener('click', handleExportCsv);
   container.querySelector('[data-inventory-action="export-logs"]').addEventListener('click', handleExportLogs);
 
   container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
     btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
   });
+
+  container.querySelectorAll('.archive-download-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      downloadLogArchive(Number(btn.dataset.archiveId), btn.dataset.location, btn.dataset.date);
+    });
+  });
+
+  const currentMonthSheetBtn = container.querySelector('.current-month-sheet-btn');
+  if (currentMonthSheetBtn) {
+    currentMonthSheetBtn.addEventListener('click', () => {
+      currentMonthSheetBtn.disabled = true;
+      handleDownloadCurrentMonthSheet(locationKey).finally(() => {
+        currentMonthSheetBtn.disabled = false;
+      });
+    });
+  }
+
+  container.querySelectorAll('.sheet-download-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      downloadInventorySheet(Number(btn.dataset.sheetId), btn.dataset.location, btn.dataset.month);
+    });
+  });
+}
+
+// Lists past days' archived logs for a location (see logArchives) — each
+// day's logs + that day's requests are cleared by a scheduled Supabase job
+// at 5pm and the day's log text is saved here for download.
+function renderArchivedLogsHtml(locationKey) {
+  const archives = logArchives[locationKey] || [];
+
+  if (!archives.length) {
+    return `<p class="empty-list-msg">No archived logs yet.</p>`;
+  }
+
+  return `
+    <ul class="log-feed-list">
+      ${archives.map((archive) => `
+        <li class="log-feed-row archive-row">
+          <span class="log-feed-time">${escapeHtml(archive.archiveDate)}</span>
+          <button type="button" class="archive-download-btn" data-archive-id="${archive.id}" data-location="${locationKey}" data-date="${escapeHtml(archive.archiveDate)}">Download</button>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
+// Lists the current month's "so far" sheet (always available, generated on
+// demand) plus up to 3 stored past months from inventory_sheets — see
+// ensurePreviousMonthSheets.
+function renderInventorySheetsHtml(locationKey) {
+  const now = new Date();
+  const currentMonthLabel = `${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()} (so far)`;
+  const sheets = [...(inventorySheets[locationKey] || [])].sort((a, b) => b.sheetMonth.localeCompare(a.sheetMonth));
+
+  return `
+    <ul class="log-feed-list">
+      <li class="log-feed-row archive-row">
+        <span class="log-feed-time">${escapeHtml(currentMonthLabel)}</span>
+        <button type="button" class="archive-download-btn current-month-sheet-btn">Download</button>
+      </li>
+      ${sheets.map((sheet) => {
+        const sheetDate = new Date(sheet.sheetMonth);
+        const label = `${MONTH_NAMES[sheetDate.getUTCMonth()]} ${sheetDate.getUTCFullYear()}`;
+        return `
+        <li class="log-feed-row archive-row">
+          <span class="log-feed-time">${escapeHtml(label)}</span>
+          <button type="button" class="archive-download-btn sheet-download-btn" data-sheet-id="${sheet.id}" data-location="${locationKey}" data-month="${escapeHtml(sheet.sheetMonth)}">Download</button>
+        </li>
+      `;
+      }).join('')}
+    </ul>
+  `;
 }
 
 function filterInventoryRows(container, searchInput) {
@@ -2096,13 +2222,17 @@ function classifyLogEntry(log, locationKey) {
   return { action: actionType, source: 'own' };
 }
 
-function buildMonthlyInventoryCsv() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
-  const locationKey = activeInventoryLocation;
-
-  const sortedLogs = [...locationLogs[locationKey]].sort((a, b) => a.timestamp - b.timestamp);
+// Builds the monthly inventory CSV for `locationKey` / `year`-`month`
+// (0-indexed), covering days 1..dayCount.
+//
+// `activityRows`/`snapshotRows` are rows from daily_item_activity /
+// daily_stock_snapshots (already classified by source and finalized as of
+// midnight IST — see archive_and_clear_daily / snapshot_end_of_day in
+// supabase-monthly-sheets.sql), used for any day before today. If `liveData`
+// is provided ({ logs, stocks }), the LAST day (dayCount) is instead built
+// from today's live, not-yet-finalized locationLogs/locationStocks via
+// classifyLogEntry — used for "current month so far" downloads.
+function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData) {
   const allItems = [...getCatalogItemNames()].sort((a, b) => a.localeCompare(b));
 
   // Source breakdown columns differ by location type.
@@ -2123,43 +2253,58 @@ function buildMonthlyInventoryCsv() {
   const subtractedCols = [...sourceColLabels, 'Total'];
   const totalDataColsPerDay = addedCols.length + subtractedCols.length + 1;
 
-  // Walk the month day-by-day, carrying running totals forward across days
-  // so every date gets a snapshot — even quiet ones.
-  const runningTotals = {};
-  let logIndex = 0;
+  const initSources = () => {
+    const init = {};
+    sourceCols.forEach((s) => { init[s] = 0; });
+    return init;
+  };
+
   const dailyActivities = [];
-  const dailySnapshots = [];
+  const dailyTotals = [];
 
-  for (let day = 1; day <= now.getDate(); day += 1) {
-    const endOfDay = new Date(year, month, day, 23, 59, 59, 999).getTime();
+  for (let day = 1; day <= dayCount; day += 1) {
+    const dateStr = formatLogDate(new Date(year, month, day));
     const activity = new Map();
+    const totals = {};
 
-    while (logIndex < sortedLogs.length && sortedLogs[logIndex].timestamp <= endOfDay) {
-      const log = sortedLogs[logIndex];
-      const currentTotal = runningTotals[log.item] || 0;
-      runningTotals[log.item] = log.actionType === 'add' ? currentTotal + log.qty : currentTotal - log.qty;
-
-      if (!activity.has(log.item)) {
-        const initSources = {};
-        sourceCols.forEach((s) => { initSources[s] = 0; });
-        activity.set(log.item, { added: { ...initSources }, subtracted: { ...initSources } });
-      }
-
-      const entry = activity.get(log.item);
-      const { action, source } = classifyLogEntry(log, locationKey);
-      const bucket = action === 'add' ? entry.added : entry.subtracted;
-      const targetSource = sourceCols.includes(source) ? source : 'own';
-      bucket[targetSource] = (bucket[targetSource] || 0) + log.qty;
-
-      logIndex += 1;
+    if (liveData && day === dayCount) {
+      // `liveData.logs` is whatever's currently in the `logs` table, which can
+      // span into yesterday evening (the daily clear only happens at 5pm) —
+      // restrict to today's entries so they aren't double-counted with
+      // yesterday's already-finalized daily_item_activity row.
+      liveData.logs.forEach((log) => {
+        if (formatLogDate(new Date(log.timestamp)) !== dateStr) return;
+        if (!activity.has(log.item)) {
+          activity.set(log.item, { added: initSources(), subtracted: initSources() });
+        }
+        const entry = activity.get(log.item);
+        const { action, source } = classifyLogEntry(log, locationKey);
+        const bucket = action === 'add' ? entry.added : entry.subtracted;
+        const targetSource = sourceCols.includes(source) ? source : 'own';
+        bucket[targetSource] = (bucket[targetSource] || 0) + log.qty;
+      });
+      Object.assign(totals, liveData.stocks);
+    } else {
+      activityRows.forEach((row) => {
+        if (row.activity_date !== dateStr) return;
+        if (!activity.has(row.item_name)) {
+          activity.set(row.item_name, { added: initSources(), subtracted: initSources() });
+        }
+        const entry = activity.get(row.item_name);
+        const targetSource = sourceCols.includes(row.source) ? row.source : 'own';
+        entry.added[targetSource] = (entry.added[targetSource] || 0) + Number(row.added);
+        entry.subtracted[targetSource] = (entry.subtracted[targetSource] || 0) + Number(row.subtracted);
+      });
+      snapshotRows.forEach((row) => {
+        if (row.activity_date === dateStr) totals[row.item_name] = Number(row.qty);
+      });
     }
 
     dailyActivities.push(activity);
-    dailySnapshots.push({ ...runningTotals });
+    dailyTotals.push(totals);
   }
 
   const itemColumns = ['Item Category', 'Item Name'];
-  const dayCount = now.getDate();
 
   // Three header rows:
   //   Row 1 — date label spanning all data columns for that day
@@ -2190,8 +2335,8 @@ function buildMonthlyInventoryCsv() {
     for (let day = 1; day <= dayCount; day += 1) {
       const index = day - 1;
       const itemActivity = dailyActivities[index].get(item);
-      const snapshot = dailySnapshots[index];
-      const endOfDayTotal = snapshot[item] !== undefined ? snapshot[item] : 0;
+      const totals = dailyTotals[index];
+      const endOfDayTotal = totals[item] !== undefined ? totals[item] : 0;
 
       const addedTotal = sourceCols.reduce((sum, src) => sum + (itemActivity ? itemActivity.added[src] : 0), 0);
       const subtractedTotal = sourceCols.reduce((sum, src) => sum + (itemActivity ? itemActivity.subtracted[src] : 0), 0);
@@ -2209,6 +2354,123 @@ function buildMonthlyInventoryCsv() {
   });
 
   return lines.join('\r\n');
+}
+
+// Builds the "current month so far" CSV for `locationKey` — days before
+// today come from daily_item_activity / daily_stock_snapshots (finalized as
+// of midnight IST by snapshot_end_of_day), and today comes from live
+// locationLogs / locationStocks (not yet finalized).
+async function buildCurrentMonthCsv(locationKey) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const dayCount = now.getDate();
+
+  let activityRows = [];
+  let snapshotRows = [];
+
+  if (dayCount > 1) {
+    const monthStart = formatLogDate(new Date(year, month, 1));
+    const yesterday = formatLogDate(new Date(year, month, dayCount - 1));
+
+    const [activityRes, snapshotRes] = await Promise.all([
+      supabaseClient.from('daily_item_activity').select('item_name, activity_date, source, added, subtracted')
+        .eq('location', locationKey).gte('activity_date', monthStart).lte('activity_date', yesterday),
+      supabaseClient.from('daily_stock_snapshots').select('item_name, activity_date, qty')
+        .eq('location', locationKey).gte('activity_date', monthStart).lte('activity_date', yesterday),
+    ]);
+    if (activityRes.error || snapshotRes.error) throw activityRes.error || snapshotRes.error;
+    activityRows = activityRes.data;
+    snapshotRows = snapshotRes.data;
+  }
+
+  const liveData = { logs: locationLogs[locationKey], stocks: locationStocks[locationKey] };
+  return buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData);
+}
+
+// Generates and stores last month's finished CSV sheet for any location that
+// doesn't have one yet (run opportunistically on every load — see
+// loadAllDataFromSupabase). Also prunes inventory_sheets down to the 3 most
+// recent months. Returns true if anything changed (so the caller can
+// re-render to show the new sheet).
+async function ensurePreviousMonthSheets() {
+  const now = new Date();
+  const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonthKey = formatLogDate(prevMonthDate);
+
+  const locations = ['warehouse', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
+  const missing = locations.filter((loc) => !(inventorySheets[loc] || []).some((s) => s.sheetMonth === prevMonthKey));
+  if (!missing.length) return false;
+
+  const daysInPrevMonth = new Date(prevMonthDate.getFullYear(), prevMonthDate.getMonth() + 1, 0).getDate();
+  const monthStart = formatLogDate(prevMonthDate);
+  const monthEnd = formatLogDate(new Date(prevMonthDate.getFullYear(), prevMonthDate.getMonth(), daysInPrevMonth));
+
+  const [activityRes, snapshotRes] = await Promise.all([
+    supabaseClient.from('daily_item_activity').select('location, item_name, activity_date, source, added, subtracted')
+      .gte('activity_date', monthStart).lte('activity_date', monthEnd),
+    supabaseClient.from('daily_stock_snapshots').select('location, item_name, activity_date, qty')
+      .gte('activity_date', monthStart).lte('activity_date', monthEnd),
+  ]);
+  if (activityRes.error || snapshotRes.error) return false;
+
+  // No recorded activity/snapshots for that month at all — most likely this
+  // feature was only just deployed and there's nothing real to show yet.
+  // Skip generating an all-zero sheet; try again next month once data exists.
+  if (!activityRes.data.length && !snapshotRes.data.length) return false;
+
+  const rows = missing.map((loc) => ({
+    location: loc,
+    sheet_month: prevMonthKey,
+    content: buildMonthlyCsv(
+      loc, prevMonthDate.getFullYear(), prevMonthDate.getMonth(), daysInPrevMonth,
+      activityRes.data.filter((r) => r.location === loc),
+      snapshotRes.data.filter((r) => r.location === loc),
+      null,
+    ),
+  }));
+
+  const { error: upsertError } = await supabaseClient.from('inventory_sheets').upsert(rows, { onConflict: 'location,sheet_month' });
+  if (upsertError) return false;
+
+  // Keep only the 3 most recent months (this one + 2 older).
+  const cutoff = formatLogDate(new Date(prevMonthDate.getFullYear(), prevMonthDate.getMonth() - 2, 1));
+  await supabaseClient.from('inventory_sheets').delete().lt('sheet_month', cutoff);
+
+  const { data, error } = await supabaseClient.from('inventory_sheets').select('id, location, sheet_month').order('sheet_month', { ascending: false });
+  if (error) return false;
+
+  const sheets = buildDefaultLocationLogs();
+  data.forEach((row) => {
+    if (!sheets[row.location]) sheets[row.location] = [];
+    sheets[row.location].push({ id: row.id, sheetMonth: row.sheet_month });
+  });
+  inventorySheets = sheets;
+
+  return true;
+}
+
+// Fetches one stored monthly sheet's CSV text on demand and triggers a
+// download.
+async function downloadInventorySheet(id, location, sheetMonth) {
+  const { data, error } = await supabaseClient.from('inventory_sheets').select('content').eq('id', id).single();
+  if (error || !data) {
+    showSyncError('Could not download sheet — check your connection.');
+    return;
+  }
+  downloadTextFile(`puchkas-inventory-${location}-${sheetMonth.slice(0, 7)}.csv`, data.content, 'text/csv;charset=utf-8;');
+}
+
+// Builds and downloads the current month's CSV "so far" for `locationKey`.
+async function handleDownloadCurrentMonthSheet(locationKey) {
+  try {
+    const csv = await buildCurrentMonthCsv(locationKey);
+    const now = new Date();
+    const filename = `puchkas-inventory-${locationKey}-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}.csv`;
+    downloadTextFile(filename, csv, 'text/csv;charset=utf-8;');
+  } catch {
+    showSyncError('Could not generate sheet — check your connection.');
+  }
 }
 
 function buildInventoryLogText() {
@@ -2331,13 +2593,6 @@ function applyBatchUpdate(source) {
   insertLogs(locationKey, newLogEntries);
   pendingBatchUpdate = null;
   renderView(currentViewKey);
-}
-
-function handleExportCsv() {
-  const now = new Date();
-  const filename = `puchkas-inventory-${activeInventoryLocation}-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}.csv`;
-
-  downloadTextFile(filename, buildMonthlyInventoryCsv(), 'text/csv;charset=utf-8;');
 }
 
 function handleExportLogs() {

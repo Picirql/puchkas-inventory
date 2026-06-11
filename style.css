@@ -1086,6 +1086,30 @@ button {
   font-size: 0.8rem;
 }
 
+.archive-row {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.archive-download-btn {
+  padding: 0.4rem 0.85rem;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.8rem;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.archive-download-btn:hover {
+  background: rgba(245, 158, 11, 0.26);
+}
+
+.archive-download-btn:active {
+  transform: scale(0.95);
+}
+
 .log-feed-tag {
   color: var(--accent-warehouse);
   font-size: 0.8rem;
