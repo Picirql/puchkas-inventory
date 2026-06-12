@@ -1348,6 +1348,7 @@ function renderInventoryDashboard(container, locationKey) {
       <div class="warehouse-toolbar">
         <input type="text" class="warehouse-search-input" placeholder="Search items..." autocomplete="off" />
         <div class="warehouse-toolbar-actions">
+          <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-csv">Export CSV</button>
           <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-logs">Export Logs (TXT)</button>
         </div>
       </div>
@@ -1390,7 +1391,7 @@ function renderInventoryDashboard(container, locationKey) {
         `).join('')}
       </div>
 
-      <section class="inventory-log-feed">
+      <section class="inventory-log-feed" id="log-update-history-section">
         <h3 class="inventory-log-title">Log Update History</h3>
         ${renderLogFeedHtml()}
       </section>
@@ -1400,7 +1401,7 @@ function renderInventoryDashboard(container, locationKey) {
         ${renderArchivedLogsHtml(locationKey)}
       </section>
 
-      <section class="inventory-log-feed">
+      <section class="inventory-log-feed" id="monthly-inventory-sheets-section">
         <h3 class="inventory-log-title">Monthly Inventory Sheets</h3>
         ${renderInventorySheetsHtml(locationKey)}
       </section>
@@ -1410,13 +1411,21 @@ function renderInventoryDashboard(container, locationKey) {
   const searchInput = container.querySelector('.warehouse-search-input');
   searchInput.addEventListener('input', () => filterInventoryRows(container, searchInput));
 
-  container.querySelector('[data-inventory-action="export-logs"]').addEventListener('click', handleExportLogs);
+  container.querySelector('[data-inventory-action="export-csv"]').addEventListener('click', () => {
+    container.querySelector('#monthly-inventory-sheets-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  container.querySelector('[data-inventory-action="export-logs"]').addEventListener('click', () => {
+    container.querySelector('#log-update-history-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  container.querySelector('.current-day-log-btn').addEventListener('click', handleExportLogs);
 
   container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
     btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
   });
 
-  container.querySelectorAll('.archive-download-btn').forEach((btn) => {
+  container.querySelectorAll('.archive-download-btn[data-archive-id]').forEach((btn) => {
     btn.addEventListener('click', () => {
       downloadLogArchive(Number(btn.dataset.archiveId), btn.dataset.location, btn.dataset.date);
     });
@@ -1500,14 +1509,22 @@ function filterInventoryRows(container, searchInput) {
 function renderLogFeedHtml() {
   const logs = locationLogs[activeInventoryLocation];
 
+  const soFarRow = `
+    <li class="log-feed-row archive-row">
+      <span class="log-feed-time">Today (so far, until 5pm reset)</span>
+      <button type="button" class="archive-download-btn current-day-log-btn">Download</button>
+    </li>
+  `;
+
   if (!logs.length) {
-    return `<p class="empty-list-msg">No stock updates logged yet.</p>`;
+    return `<ul class="log-feed-list">${soFarRow}</ul><p class="empty-list-msg">No stock updates logged yet.</p>`;
   }
 
   const sortedLogs = [...logs].sort((a, b) => b.timestamp - a.timestamp);
 
   return `
     <ul class="log-feed-list">
+      ${soFarRow}
       ${sortedLogs.map((log) => `
         <li class="log-feed-row">
           <span class="log-feed-time">${formatLogTimestamp(log.timestamp)}</span>
