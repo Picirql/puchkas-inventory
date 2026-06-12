@@ -69,66 +69,16 @@ button {
   font-size: 1rem;
 }
 
-/* ===================== Role Selection Grid ===================== */
-.role-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(140px, 180px));
-  gap: 1.25rem;
-  width: 100%;
-  max-width: 640px;
-}
-
-.role-card {
-  --accent: #6366f1;
+.login-form {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 1.75rem 1rem;
-  background: var(--card-glass);
-  border: 1px solid var(--border-glass);
-  border-radius: 18px;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  color: var(--text);
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  gap: 1.1rem;
+  width: 100%;
+  max-width: 360px;
 }
 
-.role-card:hover {
-  transform: translateY(-4px) scale(1.04);
-  border-color: var(--accent);
-  box-shadow: 0 12px 30px -10px var(--accent);
-}
-
-.role-card:active {
-  transform: scale(0.96);
-}
-
-.role-card[data-role="manager"]   { --accent: var(--accent-manager); }
-.role-card[data-role="warehouse"] { --accent: var(--accent-warehouse); }
-.role-card[data-role="shop1"]     { --accent: var(--accent-shop1); }
-.role-card[data-role="shop2"]     { --accent: var(--accent-shop2); }
-.role-card[data-role="shop3"]     { --accent: var(--accent-shop3); }
-.role-card[data-role="kitchen"]   { --accent: var(--accent-kitchen); }
-
-.role-avatar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  font-weight: 700;
-  font-size: 1.1rem;
-  color: #fff;
-  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #0f172a));
-  box-shadow: 0 6px 18px -6px var(--accent);
-}
-
-.role-name {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text);
+.login-submit-btn {
+  width: 100%;
 }
 
 /* ===================== PIN Keypad Overlay ===================== */
@@ -180,76 +130,10 @@ button {
   font-weight: 700;
 }
 
-.pin-display {
-  display: flex;
-  gap: 0.9rem;
-}
-
-.pin-display.shake {
-  animation: shake 0.4s ease;
-}
-
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  20%, 60% { transform: translateX(-8px); }
-  40%, 80% { transform: translateX(8px); }
-}
-
-.pin-dot {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 2px solid var(--border-glass);
-  background: transparent;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
-}
-
-.pin-dot.filled {
-  background: #6366f1;
-  border-color: #6366f1;
-  transform: scale(1.15);
-}
-
 .pin-error {
   color: var(--danger);
   font-size: 0.85rem;
   text-align: center;
-}
-
-.pin-keypad {
-  display: grid;
-  grid-template-columns: repeat(3, 64px);
-  grid-auto-rows: 64px;
-  gap: 0.75rem;
-}
-
-.key {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 16px;
-  background: rgba(148, 163, 184, 0.08);
-  border: 1px solid var(--border-glass);
-  color: var(--text);
-  font-size: 1.15rem;
-  font-weight: 600;
-  transition: transform 0.12s ease, background 0.12s ease;
-}
-
-.key:hover {
-  background: rgba(148, 163, 184, 0.16);
-  transform: scale(1.06);
-}
-
-.key:active {
-  transform: scale(0.92);
-  background: rgba(99, 102, 241, 0.35);
-}
-
-.key-action {
-  font-size: 0.8rem;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
 }
 
 .pin-cancel-btn {
@@ -353,8 +237,12 @@ button {
 }
 
 .user-role-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
-  text-transform: capitalize;
   font-size: 0.9rem;
 }
 
@@ -432,10 +320,17 @@ button {
   -webkit-backdrop-filter: none;
 }
 
-/* Location views (Kitchen, Shop1-3) host wide request tables, so give
-   them the same generous width as the Warehouse view. */
+/* Location views (Kitchen, Shop1-4) host wide request tables and build their
+   own card layout (inventory columns, log feeds, request history), so opt
+   out of the outer glass panel the same way .is-bare does — otherwise the
+   outer card's edge peeks out from behind the inner cards on mobile. */
 .view-content.is-wide {
   max-width: 1100px;
+  padding: 0;
+  background: none;
+  border: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ----- Content Header (view title + mobile hamburger) ----- */
@@ -641,6 +536,12 @@ button {
   font-size: 0.95rem;
   font-weight: 500;
   color: var(--text);
+}
+
+.item-email {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .item-edit-btn,
@@ -1255,6 +1156,19 @@ button {
   transform: scale(0.96);
 }
 
+/* ===================== Add User Form ===================== */
+.add-user-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.form-success {
+  color: #4ade80;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 /* ----- Warehouse Requests (Shop / Kitchen → Warehouse) ----- */
 .warehouse-requests {
   display: flex;
@@ -1624,17 +1538,5 @@ button {
 
   .main-content {
     padding: 1.25rem;
-  }
-
-  .role-grid {
-    grid-template-columns: repeat(2, minmax(120px, 1fr));
-    max-width: 420px;
-  }
-}
-
-@media (max-width: 420px) {
-  .pin-keypad {
-    grid-template-columns: repeat(3, 56px);
-    grid-auto-rows: 56px;
   }
 }

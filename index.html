@@ -20,79 +20,25 @@
   <main id="login-screen" class="login-screen">
     <header class="login-header">
       <h1>Puchkas Inventory Management</h1>
-      <p class="login-subtitle">Select your role to sign in</p>
+      <p class="login-subtitle">Sign in to continue</p>
     </header>
 
-    <!-- Role Selection Grid -->
-    <section id="role-grid" class="role-grid">
-      <button class="role-card" data-role="manager">
-        <span class="role-avatar">M</span>
-        <span class="role-name">Manager</span>
-      </button>
-
-      <button class="role-card" data-role="warehouse">
-        <span class="role-avatar">W</span>
-        <span class="role-name">Warehouse</span>
-      </button>
-
-      <button class="role-card" data-role="shop1">
-        <span class="role-avatar">S1</span>
-        <span class="role-name">Shop 1</span>
-      </button>
-
-      <button class="role-card" data-role="shop2">
-        <span class="role-avatar">S2</span>
-        <span class="role-name">Shop 2</span>
-      </button>
-
-      <button class="role-card" data-role="shop3">
-        <span class="role-avatar">S3</span>
-        <span class="role-name">Shop 3</span>
-      </button>
-
-      <button class="role-card" data-role="shop4">
-        <span class="role-avatar">S4</span>
-        <span class="role-name">Shop 4</span>
-      </button>
-
-      <button class="role-card" data-role="kitchen">
-        <span class="role-avatar">K</span>
-        <span class="role-name">Kitchen</span>
-      </button>
-    </section>
-
-    <!-- PIN Keypad Overlay -->
-    <div id="pin-overlay" class="pin-overlay" hidden>
-      <div class="pin-modal">
-        <p class="pin-role-label">Enter PIN for <span id="pin-role-name">Role</span></p>
-
-        <div class="pin-display" id="pin-display">
-          <span class="pin-dot" data-index="0"></span>
-          <span class="pin-dot" data-index="1"></span>
-          <span class="pin-dot" data-index="2"></span>
-          <span class="pin-dot" data-index="3"></span>
-        </div>
-
-        <p id="pin-error" class="pin-error" hidden>Incorrect PIN. Try again.</p>
-
-        <div class="pin-keypad">
-          <button class="key" data-key="1">1</button>
-          <button class="key" data-key="2">2</button>
-          <button class="key" data-key="3">3</button>
-          <button class="key" data-key="4">4</button>
-          <button class="key" data-key="5">5</button>
-          <button class="key" data-key="6">6</button>
-          <button class="key" data-key="7">7</button>
-          <button class="key" data-key="8">8</button>
-          <button class="key" data-key="9">9</button>
-          <button class="key key-action" data-key="clear">Clear</button>
-          <button class="key" data-key="0">0</button>
-          <button class="key key-action" data-key="backspace">⌫</button>
-        </div>
-
-        <button id="pin-cancel-btn" class="pin-cancel-btn">Cancel</button>
+    <!-- Email / Password Login Form -->
+    <form id="login-form" class="login-form">
+      <div class="stock-field">
+        <label for="login-email" class="stock-field-label">Email</label>
+        <input type="email" id="login-email" class="stock-item-search" placeholder="you@example.com" autocomplete="username" required />
       </div>
-    </div>
+
+      <div class="stock-field">
+        <label for="login-password" class="stock-field-label">Password</label>
+        <input type="password" id="login-password" class="stock-item-search" placeholder="Password" autocomplete="current-password" required />
+      </div>
+
+      <p id="login-error" class="pin-error" hidden></p>
+
+      <button type="submit" id="login-submit-btn" class="stock-save-btn login-submit-btn">Log In</button>
+    </form>
   </main>
 
   <!-- App Shell (hidden until login succeeds) -->
@@ -113,6 +59,7 @@
         <li><button class="nav-btn" data-view="shop3">Shop 3</button></li>
         <li><button class="nav-btn" data-view="shop4">Shop 4</button></li>
         <li><button class="nav-btn" data-view="kitchen">Kitchen</button></li>
+        <li><button class="nav-btn" data-view="users">Users</button></li>
       </ul>
 
       <div class="user-profile-card">

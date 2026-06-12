@@ -6,15 +6,13 @@ const SUPABASE_URL = 'https://ilukgcqcvysduxczhrfi.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlsdWtnY3FjdnlzZHV4Y3pocmZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwNzgwMTEsImV4cCI6MjA5NjY1NDAxMX0.2H9mO-qpQKJLNffqLB3Ekmu5QUWadRwkF5DhzC3k8SE';
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const PINS = {
-  manager: '1234',
-  warehouse: '2222',
-  shop1: '1111',
-  shop2: '3333',
-  shop3: '4444',
-  shop4: '6666',
-  kitchen: '5555',
-};
+// Separate client (no session persistence) used only for creating new
+// accounts from the Users screen — supabase-js's auth.signUp() signs the
+// new account into whichever client made the call, so using the shared
+// `supabaseClient` here would log the manager out of their own session.
+const authSignupClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 const ROLE_LABELS = {
   manager: 'Manager',
@@ -30,7 +28,7 @@ const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'ki
 const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
 
 const ROLE_ACCESS = {
-  manager: ALL_VIEWS,
+  manager: [...ALL_VIEWS, 'users'],
   warehouse: ['warehouse'],
   shop1: ['shop1'],
   shop2: ['shop2'],
@@ -39,18 +37,19 @@ const ROLE_ACCESS = {
   kitchen: ['kitchen'],
 };
 
-const SESSION_KEY = 'puchkasInventorySession';
-
 // ===================== State =====================
 
-let selectedRole = null;
-let enteredPin = [];
+// Role and username of the signed-in account, read from the `profiles` table
+// after Supabase Auth login — see fetchProfile(). Session persistence itself
+// is handled by supabaseClient (it stores its own session in localStorage).
+let currentUserRole = null;
+let currentUsername = null;
 let pendingRemoval = null;
 let pendingEdit = null;
 let pendingPartialDispatch = null;
 let currentViewKey = null;
 let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }] }
-let pendingLoginRole = null; // role to retry entering after a failed initial Supabase load
+let pendingLoginProfile = null; // profile to retry entering after a failed initial Supabase load
 
 // All five of these are populated from Supabase by loadAllDataFromSupabase()
 // once the user logs in — see "Supabase Sync" below. They start out empty so
@@ -96,15 +95,11 @@ let inventorySheets = buildDefaultLocationLogs();
 const loginScreen = document.getElementById('login-screen');
 const appShell = document.getElementById('app-shell');
 
-const roleCards = document.querySelectorAll('.role-card');
-
-const pinOverlay = document.getElementById('pin-overlay');
-const pinRoleName = document.getElementById('pin-role-name');
-const pinDisplay = document.getElementById('pin-display');
-const pinDots = document.querySelectorAll('.pin-dot');
-const pinError = document.getElementById('pin-error');
-const pinCancelBtn = document.getElementById('pin-cancel-btn');
-const keypadButtons = document.querySelectorAll('.key');
+const loginForm = document.getElementById('login-form');
+const loginEmailInput = document.getElementById('login-email');
+const loginPasswordInput = document.getElementById('login-password');
+const loginError = document.getElementById('login-error');
+const loginSubmitBtn = document.getElementById('login-submit-btn');
 
 const loggedInRoleLabel = document.getElementById('logged-in-role');
 const logoutBtn = document.getElementById('logout-btn');
@@ -160,93 +155,20 @@ const batchSourceCancelBtn = document.getElementById('batch-source-cancel-btn');
 const hamburgerBtn = document.getElementById('hamburger-btn');
 const sidebarBackdrop = document.getElementById('sidebar-backdrop');
 
-// ===================== PIN Pad =====================
+// ===================== Auth =====================
 
-function openPinPad(role) {
-  selectedRole = role;
-  enteredPin = [];
-  pinRoleName.textContent = ROLE_LABELS[role] || role;
-  pinError.hidden = true;
-  updatePinDisplay();
-  pinOverlay.hidden = false;
+// Looks up the role assigned to a signed-in account via the `profiles`
+// table (see supabase-auth-profiles.sql). Returns null if no profile row
+// exists yet — e.g. an account created without one being assigned.
+async function fetchProfile(userId) {
+  const { data, error } = await supabaseClient.from('profiles').select('role, email, username').eq('id', userId).single();
+  if (error || !data) return null;
+  return data;
 }
 
-function closePinPad() {
-  pinOverlay.hidden = true;
-  selectedRole = null;
-  enteredPin = [];
-  pinError.hidden = true;
-  updatePinDisplay();
-}
-
-function updatePinDisplay() {
-  pinDots.forEach((dot, index) => {
-    dot.classList.toggle('filled', index < enteredPin.length);
-  });
-}
-
-function handleKeyPress(key) {
-  if (key === 'clear') {
-    enteredPin = [];
-    updatePinDisplay();
-    return;
-  }
-
-  if (key === 'backspace') {
-    enteredPin.pop();
-    updatePinDisplay();
-    return;
-  }
-
-  if (enteredPin.length < 4) {
-    enteredPin.push(key);
-    updatePinDisplay();
-  }
-
-  if (enteredPin.length === 4) {
-    validatePin();
-  }
-}
-
-function validatePin() {
-  const code = enteredPin.join('');
-
-  if (code === PINS[selectedRole]) {
-    const role = selectedRole;
-    saveSession(role);
-    closePinPad();
-    enterApp(role);
-  } else {
-    pinDisplay.classList.add('shake');
-    pinError.hidden = false;
-
-    setTimeout(() => {
-      pinDisplay.classList.remove('shake');
-      enteredPin = [];
-      updatePinDisplay();
-    }, 400);
-  }
-}
-
-// ===================== Session =====================
-
-function saveSession(role) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ role }));
-}
-
-function loadSession() {
-  const raw = localStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    return null;
-  }
-}
-
-function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
+function showLoginError(message) {
+  loginError.textContent = message;
+  loginError.hidden = false;
 }
 
 function buildDefaultLocationStocks() {
@@ -483,7 +405,10 @@ async function renameCatalogItemEverywhere(category, oldName, newName, mergedSto
 
 // ===================== App Shell / Views =====================
 
-async function enterApp(role) {
+async function enterApp(profile) {
+  const { role, username } = profile;
+  currentUserRole = role;
+  currentUsername = username;
   loginScreen.style.display = 'none';
 
   dataLoadingError.hidden = true;
@@ -497,14 +422,14 @@ async function enterApp(role) {
     dataLoadingStatus.hidden = true;
     dataLoadingError.hidden = false;
     dataLoadingRetryBtn.hidden = false;
-    pendingLoginRole = role;
+    pendingLoginProfile = profile;
     return;
   }
 
   dataLoadingOverlay.hidden = true;
   appShell.style.display = 'flex';
 
-  loggedInRoleLabel.textContent = ROLE_LABELS[role] || role;
+  loggedInRoleLabel.textContent = `${username} (${ROLE_LABELS[role] || role})`;
 
   const allowedViews = applyRoleAccess(role);
   if (allowedViews.length) {
@@ -526,7 +451,7 @@ function applyRoleAccess(role) {
 function renderView(viewKey) {
   currentViewKey = viewKey;
 
-  viewTitle.textContent = viewKey === 'items' ? 'Items' : (ROLE_LABELS[viewKey] || viewKey);
+  viewTitle.textContent = viewKey === 'items' ? 'Items' : viewKey === 'users' ? 'Users' : (ROLE_LABELS[viewKey] || viewKey);
 
   navButtons.forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.view === viewKey);
@@ -536,11 +461,13 @@ function renderView(viewKey) {
   viewContent.hidden = isWarehouse;
   warehouseView.hidden = !isWarehouse;
 
-  viewContent.classList.toggle('is-bare', viewKey === 'items');
+  viewContent.classList.toggle('is-bare', viewKey === 'items' || viewKey === 'users');
   viewContent.classList.toggle('is-wide', LOCATION_VIEWS.includes(viewKey));
 
   if (viewKey === 'items') {
     renderItemsView();
+  } else if (viewKey === 'users') {
+    renderUsersView();
   } else if (isWarehouse) {
     renderWarehouseView();
   } else if (LOCATION_VIEWS.includes(viewKey)) {
@@ -792,6 +719,133 @@ function escapeHtml(value) {
   const div = document.createElement('div');
   div.textContent = value;
   return div.innerHTML;
+}
+
+// ===================== Users View =====================
+
+function renderUsersView() {
+  viewContent.innerHTML = `
+    <div class="items-dashboard">
+      <section class="items-card">
+        <h3 class="items-card-title">Add User</h3>
+
+        <form id="add-user-form" class="add-user-form">
+          <div class="stock-field">
+            <label for="add-user-username" class="stock-field-label">Username</label>
+            <input type="text" id="add-user-username" class="stock-item-search" placeholder="e.g. rishit" autocomplete="off" required />
+          </div>
+
+          <div class="stock-field">
+            <label for="add-user-email" class="stock-field-label">Email</label>
+            <input type="email" id="add-user-email" class="stock-item-search" placeholder="person@example.com" autocomplete="off" required />
+          </div>
+
+          <div class="stock-field">
+            <label for="add-user-password" class="stock-field-label">Password</label>
+            <input type="password" id="add-user-password" class="stock-item-search" placeholder="Temporary password" autocomplete="new-password" required minlength="6" />
+          </div>
+
+          <div class="stock-field">
+            <label for="add-user-role" class="stock-field-label">Role</label>
+            <select id="add-user-role" class="stock-action-select">
+              ${Object.entries(ROLE_LABELS).map(([value, label]) => `<option value="${value}">${escapeHtml(label)}</option>`).join('')}
+            </select>
+          </div>
+
+          <p id="add-user-error" class="stock-modal-error" hidden></p>
+          <p id="add-user-success" class="form-success" hidden></p>
+
+          <button type="submit" id="add-user-submit-btn" class="stock-save-btn">Add User</button>
+        </form>
+      </section>
+
+      <section class="items-card">
+        <h3 class="items-card-title">Existing Users</h3>
+        <div id="users-list">
+          <p class="empty-list-msg">Loading users...</p>
+        </div>
+      </section>
+    </div>
+  `;
+
+  const form = viewContent.querySelector('#add-user-form');
+  const errorEl = viewContent.querySelector('#add-user-error');
+  const successEl = viewContent.querySelector('#add-user-success');
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    handleCreateUser(form, errorEl, successEl);
+  });
+
+  refreshUsersList();
+}
+
+async function fetchAllProfiles() {
+  const { data, error } = await supabaseClient.from('profiles').select('id, email, username, role').order('username');
+  if (error || !data) return [];
+  return data;
+}
+
+function renderUsersListHtml(profiles) {
+  if (!profiles.length) {
+    return `<p class="empty-list-msg">No users yet.</p>`;
+  }
+
+  return `
+    <ul class="item-list">
+      ${profiles.map((profile) => `
+        <li class="item-row">
+          <span class="item-name">${escapeHtml(profile.username)} <span class="item-email">(${escapeHtml(profile.email)})</span></span>
+          <span class="status-badge">${escapeHtml(ROLE_LABELS[profile.role] || profile.role)}</span>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
+async function refreshUsersList() {
+  const profiles = await fetchAllProfiles();
+  const listEl = document.getElementById('users-list');
+  if (!listEl) return;
+  listEl.innerHTML = renderUsersListHtml(profiles);
+}
+
+async function handleCreateUser(form, errorEl, successEl) {
+  errorEl.hidden = true;
+  successEl.hidden = true;
+
+  const username = form.querySelector('#add-user-username').value.trim();
+  const email = form.querySelector('#add-user-email').value.trim();
+  const password = form.querySelector('#add-user-password').value;
+  const role = form.querySelector('#add-user-role').value;
+
+  const submitBtn = form.querySelector('#add-user-submit-btn');
+  submitBtn.disabled = true;
+
+  try {
+    const { data, error } = await authSignupClient.auth.signUp({ email, password });
+
+    if (error || !data.user) {
+      errorEl.textContent = error ? error.message : 'Could not create the account.';
+      errorEl.hidden = false;
+      return;
+    }
+
+    const { error: profileError } = await supabaseClient.from('profiles').insert({ id: data.user.id, email, username, role });
+
+    if (profileError) {
+      errorEl.textContent = `Account created, but could not assign a role: ${profileError.message}`;
+      errorEl.hidden = false;
+      return;
+    }
+
+    successEl.textContent = `User ${username} created.`;
+    successEl.hidden = false;
+    form.reset();
+    refreshUsersList();
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 // ===================== Warehouse View =====================
@@ -1944,8 +1998,7 @@ function roundToTwoDecimals(value) {
 }
 
 function getCurrentUserRole() {
-  const session = loadSession();
-  return session ? session.role : null;
+  return currentUserRole;
 }
 
 function openStockModal() {
@@ -2492,10 +2545,13 @@ function handleExportLogs() {
   downloadTextFile(filename, buildInventoryLogText(), 'text/plain;charset=utf-8;');
 }
 
-function logout() {
-  clearSession();
-  selectedRole = null;
-  enteredPin = [];
+async function logout() {
+  await supabaseClient.auth.signOut();
+  currentUserRole = null;
+  currentUsername = null;
+
+  loginForm.reset();
+  loginError.hidden = true;
 
   appShell.style.display = 'none';
   appShell.classList.remove('sidebar-open');
@@ -2514,19 +2570,35 @@ function closeSidebarDrawer() {
 
 // ===================== Event Listeners =====================
 
-roleCards.forEach((card) => {
-  card.addEventListener('click', () => {
-    openPinPad(card.dataset.role);
-  });
-});
+loginForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  loginError.hidden = true;
 
-keypadButtons.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    handleKeyPress(btn.dataset.key);
-  });
-});
+  const email = loginEmailInput.value.trim();
+  const password = loginPasswordInput.value;
 
-pinCancelBtn.addEventListener('click', closePinPad);
+  loginSubmitBtn.disabled = true;
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+
+    if (error || !data.session) {
+      showLoginError('Incorrect email or password.');
+      return;
+    }
+
+    const profile = await fetchProfile(data.user.id);
+    if (!profile) {
+      showLoginError('No role assigned to this account. Contact your manager.');
+      await supabaseClient.auth.signOut();
+      return;
+    }
+
+    loginPasswordInput.value = '';
+    await enterApp(profile);
+  } finally {
+    loginSubmitBtn.disabled = false;
+  }
+});
 
 confirmRemoveBtn.addEventListener('click', confirmRemoval);
 confirmCancelBtn.addEventListener('click', closeConfirmDialog);
@@ -2602,7 +2674,7 @@ stockItemSuggestions.addEventListener('click', (event) => {
 logoutBtn.addEventListener('click', logout);
 
 dataLoadingRetryBtn.addEventListener('click', () => {
-  if (pendingLoginRole) enterApp(pendingLoginRole);
+  if (pendingLoginProfile) enterApp(pendingLoginProfile);
 });
 
 refreshDataBtn.addEventListener('click', async () => {
@@ -2635,12 +2707,17 @@ sidebarBackdrop.addEventListener('click', closeSidebarDrawer);
 
 // ===================== Init =====================
 
-(function init() {
-  const session = loadSession();
+(async function init() {
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  if (!session) return;
 
-  if (session && session.role && PINS[session.role]) {
-    enterApp(session.role);
+  const profile = await fetchProfile(session.user.id);
+  if (!profile) {
+    await supabaseClient.auth.signOut();
+    return;
   }
+
+  await enterApp(profile);
 })();
 
 if ('serviceWorker' in navigator) {
