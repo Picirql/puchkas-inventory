@@ -1567,18 +1567,6 @@ button {
     grid-template-columns: 1fr;
   }
 
-  .inventory-log-feed {
-    position: sticky;
-    bottom: 0;
-    max-height: 45vh;
-    overflow-y: auto;
-    box-shadow: 0 -16px 30px -18px rgba(0, 0, 0, 0.65);
-  }
-
-  .log-feed-list {
-    max-height: none;
-  }
-
   .requests-table-wrap {
     max-height: min(280px, 38vh);
   }
