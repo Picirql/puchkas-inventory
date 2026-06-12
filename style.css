@@ -438,6 +438,20 @@ button {
   max-width: 1100px;
 }
 
+/* ----- Content Header (view title + mobile hamburger) ----- */
+.content-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.view-title {
+  margin: 0;
+  font-size: 1.4rem;
+  color: var(--text);
+}
+
 /* ----- Hamburger (mobile only) ----- */
 .hamburger-btn {
   display: none;
@@ -446,7 +460,7 @@ button {
   gap: 5px;
   width: 42px;
   height: 42px;
-  margin-bottom: 1.25rem;
+  flex-shrink: 0;
   border-radius: 10px;
   background: var(--card-glass);
   border: 1px solid var(--border-glass);

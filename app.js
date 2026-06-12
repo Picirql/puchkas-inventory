@@ -111,6 +111,7 @@ const logoutBtn = document.getElementById('logout-btn');
 const refreshDataBtn = document.getElementById('refresh-data-btn');
 const navButtons = document.querySelectorAll('.nav-btn');
 const viewContent = document.getElementById('view-content');
+const viewTitle = document.getElementById('view-title');
 
 const dataLoadingOverlay = document.getElementById('data-loading-overlay');
 const dataLoadingStatus = document.getElementById('data-loading-status');
@@ -524,6 +525,8 @@ function applyRoleAccess(role) {
 
 function renderView(viewKey) {
   currentViewKey = viewKey;
+
+  viewTitle.textContent = viewKey === 'items' ? 'Items' : (ROLE_LABELS[viewKey] || viewKey);
 
   navButtons.forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.view === viewKey);
