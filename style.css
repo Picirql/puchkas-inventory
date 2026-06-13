@@ -1496,7 +1496,7 @@ button {
   }
 
   .requests-table-wrap {
-    max-height: min(280px, 38vh);
+    max-height: min(520px, 65vh);
   }
 
   .requests-table {
