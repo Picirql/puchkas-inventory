@@ -48,7 +48,8 @@ let pendingRemoval = null;
 let pendingEdit = null;
 let pendingPartialDispatch = null;
 let currentViewKey = null;
-let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }] }
+let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }], lockItems: [item, ...] }
+let pendingClosingStockUpdate = null; // { locationKey, closingChanges: [{ item, closingQty }] }
 let pendingLoginProfile = null; // profile to retry entering after a failed initial Supabase load
 
 // All five of these are populated from Supabase by loadAllDataFromSupabase()
@@ -68,6 +69,13 @@ let activeInventoryLocation = 'warehouse';
 // location (e.g. Kitchen) never bleed into another's (e.g. Shop 1) numbers.
 let locationStocks = buildDefaultLocationStocks();
 let locationLogs = buildDefaultLocationLogs();
+
+// Per-location map of items whose Closing Stock has already been recorded
+// today — for Shop 1-4 and Kitchen General Inventory. Presence of an item
+// key means its Add/Closing Stock inputs are locked ('-') until the daily
+// reset; the value is the computed "Stock Used" to display, or null when
+// the item was locked via "Update Stock" (Closing Stock input ignored).
+let closingStockLocks = buildDefaultLocationStocks();
 
 // Elements: { id, timestamp, fromLocation, item, qty, status: 'Pending' | 'Dispatched' | 'Received' }
 let warehouseRequests = [];
@@ -219,7 +227,7 @@ function showSyncError(message) {
 // Refresh button) — every render function reads from these same variables,
 // so nothing else needs to change.
 async function loadAllDataFromSupabase() {
-  const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes, archivesRes, sheetsRes] = await Promise.all([
+  const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes, archivesRes, sheetsRes, closingLocksRes] = await Promise.all([
     supabaseClient.from('items').select('category, name'),
     supabaseClient.from('stocks').select('location, item_name, qty'),
     supabaseClient.from('logs').select('*'),
@@ -227,9 +235,10 @@ async function loadAllDataFromSupabase() {
     supabaseClient.from('kitchen_requests').select('*'),
     supabaseClient.from('log_archives').select('id, location, archive_date').order('archive_date', { ascending: false }),
     supabaseClient.from('inventory_sheets').select('id, location, sheet_month').order('sheet_month', { ascending: false }),
+    supabaseClient.from('closing_stock_locks').select('location, item_name, stock_used'),
   ]);
 
-  const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error || archivesRes.error || sheetsRes.error;
+  const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error || archivesRes.error || sheetsRes.error || closingLocksRes.error;
   if (error) throw error;
 
   const catalog = { raw: [], processed: [] };
@@ -291,6 +300,13 @@ async function loadAllDataFromSupabase() {
     sheets[row.location].push({ id: row.id, sheetMonth: row.sheet_month });
   });
   inventorySheets = sheets;
+
+  const closingLocks = buildDefaultLocationStocks();
+  closingLocksRes.data.forEach((row) => {
+    if (!closingLocks[row.location]) closingLocks[row.location] = {};
+    closingLocks[row.location][row.item_name] = row.stock_used === null ? null : Number(row.stock_used);
+  });
+  closingStockLocks = closingLocks;
 
   ensurePreviousMonthSheets().then((changed) => {
     if (changed) rerenderPreservingScroll();
@@ -369,6 +385,16 @@ async function updateKitchenRequests(requests) {
     supabaseClient.from('kitchen_requests').update({ status: r.status, qty: r.qty }).eq('id', r.id)
   )));
   if (results.some((r) => r.error)) showSyncError('Could not update request — check your connection.');
+}
+
+// Locks an item's Add/Closing Stock inputs for the rest of the day —
+// stockUsed is the computed "Stock Used" value, or null when the item was
+// locked via "Update Stock" with a Closing Stock input present (ignored).
+async function upsertClosingStockLocks(location, items) {
+  if (!items.length) return;
+  const rows = items.map(({ item, stockUsed }) => ({ location, item_name: item, stock_used: stockUsed }));
+  const { error } = await supabaseClient.from('closing_stock_locks').upsert(rows, { onConflict: 'location,item_name' });
+  if (error) showSyncError('Could not save closing stock — check your connection.');
 }
 
 async function insertCatalogItem(category, name) {
@@ -696,12 +722,14 @@ function handleRemoveItem(category, index) {
 
   pendingRemoval = { category, index };
   confirmMessage.innerHTML = `Remove <strong>${escapeHtml(itemName)}</strong> from the catalog?`;
+  confirmRemoveBtn.textContent = 'Remove';
   confirmOverlay.hidden = false;
 }
 
 function closeConfirmDialog() {
   confirmOverlay.hidden = true;
   pendingRemoval = null;
+  pendingClosingStockUpdate = null;
 }
 
 function confirmRemoval() {
@@ -1527,6 +1555,8 @@ function confirmPartialKitchenDispatch() {
 function renderInventoryDashboard(container, locationKey) {
   activeInventoryLocation = locationKey;
   const stock = locationStocks[locationKey];
+  const isWarehouse = locationKey === 'warehouse';
+  const closingLocks = closingStockLocks[locationKey];
 
   container.innerHTML = `
     <div class="general-inventory">
@@ -1544,32 +1574,61 @@ function renderInventoryDashboard(container, locationKey) {
             <h3 class="inventory-column-title">${category.label}</h3>
             ${itemsCatalog[category.key].length
               ? `<div class="inventory-table-wrap">
-                  <table class="inventory-table">
+                  <table class="inventory-table ${isWarehouse ? '' : 'inventory-table-closing'}">
                     <thead>
                       <tr>
                         <th>Item</th>
                         <th>Stock</th>
                         <th>Add</th>
-                        <th>Remove</th>
+                        ${isWarehouse
+                          ? `<th>Remove</th>`
+                          : `<th>Closing Stock</th><th>Stock Used</th>`}
                       </tr>
                     </thead>
                     <tbody>
-                      ${itemsCatalog[category.key].map((item) => `
-                        <tr class="inventory-row" data-item="${escapeHtml(item)}">
-                          <td class="inventory-item-name">${escapeHtml(item)}</td>
-                          <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
-                          <td><input type="number" class="batch-qty-input batch-add-input" min="0" step="any" placeholder="–" /></td>
-                          <td><input type="number" class="batch-qty-input batch-remove-input" min="0" step="any" placeholder="–" /></td>
-                        </tr>
-                      `).join('')}
+                      ${itemsCatalog[category.key].map((item) => {
+                        if (isWarehouse) {
+                          return `
+                            <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                              <td class="inventory-item-name">${escapeHtml(item)}</td>
+                              <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
+                              <td><input type="number" class="batch-qty-input batch-add-input" min="0" step="any" placeholder="–" /></td>
+                              <td><input type="number" class="batch-qty-input batch-remove-input" min="0" step="any" placeholder="–" /></td>
+                            </tr>
+                          `;
+                        }
+
+                        const locked = Object.prototype.hasOwnProperty.call(closingLocks, item);
+                        const stockUsed = locked ? closingLocks[item] : null;
+                        return `
+                          <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                            <td class="inventory-item-name">${escapeHtml(item)}</td>
+                            <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
+                            <td>${locked
+                              ? `<span class="locked-cell">–</span>`
+                              : `<input type="number" class="batch-qty-input batch-add-input" min="0" step="any" placeholder="–" />`}</td>
+                            <td>${locked
+                              ? `<span class="locked-cell">–</span>`
+                              : `<input type="number" class="batch-qty-input batch-closing-input" min="0" step="any" placeholder="–" />`}</td>
+                            <td><span class="inventory-stock-used">${stockUsed === null || stockUsed === undefined ? '–' : stockUsed}</span></td>
+                          </tr>
+                        `;
+                      }).join('')}
                     </tbody>
                   </table>
                 </div>
                 <div class="batch-section-footer">
                   <p class="batch-update-error stock-modal-error" hidden></p>
-                  <button type="button" class="update-stock-section-btn" data-category="${category.key}">
-                    Update Stock
-                  </button>
+                  <div class="batch-section-footer-buttons">
+                    <button type="button" class="update-stock-section-btn" data-category="${category.key}">
+                      Update Stock
+                    </button>
+                    ${isWarehouse ? '' : `
+                      <button type="button" class="update-closing-stock-section-btn" data-category="${category.key}">
+                        Update Closing Stock
+                      </button>
+                    `}
+                  </div>
                 </div>`
               : `<p class="empty-list-msg">No items in this category yet.</p>`}
           </section>
@@ -1608,6 +1667,10 @@ function renderInventoryDashboard(container, locationKey) {
 
   container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
     btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
+  });
+
+  container.querySelectorAll('.update-closing-stock-section-btn').forEach((btn) => {
+    btn.addEventListener('click', () => handleClosingStockUpdateClick(container, btn.dataset.category, locationKey));
   });
 
   container.querySelectorAll('.archive-download-btn[data-archive-id]').forEach((btn) => {
@@ -2688,36 +2751,61 @@ function handleBatchUpdateClick(container, categoryKey, locationKey) {
   const section = container.querySelector(`[data-category="${categoryKey}"]`).closest('.inventory-column');
   const errorEl = section.querySelector('.batch-update-error');
   const stock = locationStocks[locationKey];
+  const isWarehouse = locationKey === 'warehouse';
+  const closingLocks = closingStockLocks[locationKey];
 
   // Clear previous error state
   section.querySelectorAll('.inventory-row').forEach((row) => row.classList.remove('invalid-batch-row'));
   errorEl.hidden = true;
 
   const changes = [];
+  const lockItems = [];
   let hasConflict = false;
   let hasInvalid = false;
 
   section.querySelectorAll('.inventory-row').forEach((row) => {
     const item = row.dataset.item;
-    const addQty = Number(row.querySelector('.batch-add-input').value) || 0;
-    const removeQty = Number(row.querySelector('.batch-remove-input').value) || 0;
 
-    if (addQty > 0 && removeQty > 0) {
-      row.classList.add('invalid-batch-row');
-      hasConflict = true;
+    if (isWarehouse) {
+      const addQty = Number(row.querySelector('.batch-add-input').value) || 0;
+      const removeQty = Number(row.querySelector('.batch-remove-input').value) || 0;
+
+      if (addQty > 0 && removeQty > 0) {
+        row.classList.add('invalid-batch-row');
+        hasConflict = true;
+        return;
+      }
+      if (addQty > 0) {
+        changes.push({ item, actionType: 'add', qty: addQty });
+      }
+      if (removeQty > 0) {
+        const currentStock = stock[item] || 0;
+        if (removeQty > currentStock) {
+          row.classList.add('invalid-batch-row');
+          hasInvalid = true;
+        } else {
+          changes.push({ item, actionType: 'subtract', qty: removeQty });
+        }
+      }
       return;
     }
+
+    // Shop / Kitchen General Inventory: Add + Closing Stock columns.
+    // "Update Stock" only ever acts on the Add input. If Closing Stock also
+    // has a value, the item still becomes locked for the rest of the day —
+    // but with no Stock Used value, since the closing-stock action itself
+    // was not performed.
+    if (Object.prototype.hasOwnProperty.call(closingLocks, item)) return;
+
+    const addQty = Number(row.querySelector('.batch-add-input').value) || 0;
+    const closingInput = row.querySelector('.batch-closing-input');
+    const hasClosingValue = closingInput.value.trim() !== '';
+
     if (addQty > 0) {
       changes.push({ item, actionType: 'add', qty: addQty });
     }
-    if (removeQty > 0) {
-      const currentStock = stock[item] || 0;
-      if (removeQty > currentStock) {
-        row.classList.add('invalid-batch-row');
-        hasInvalid = true;
-      } else {
-        changes.push({ item, actionType: 'subtract', qty: removeQty });
-      }
+    if (hasClosingValue) {
+      lockItems.push(item);
     }
   });
 
@@ -2731,11 +2819,11 @@ function handleBatchUpdateClick(container, categoryKey, locationKey) {
     errorEl.hidden = false;
     return;
   }
-  if (changes.length === 0) return;
+  if (changes.length === 0 && lockItems.length === 0) return;
 
-  pendingBatchUpdate = { locationKey, changes };
+  pendingBatchUpdate = { locationKey, changes, lockItems };
 
-  if (stockUpdateRequiresSource()) {
+  if (changes.length && stockUpdateRequiresSource()) {
     batchSourceSelect.value = '';
     batchSourceError.hidden = true;
     batchSourceModal.hidden = false;
@@ -2747,7 +2835,7 @@ function handleBatchUpdateClick(container, categoryKey, locationKey) {
 function applyBatchUpdate(source) {
   if (!pendingBatchUpdate) return;
 
-  const { locationKey, changes } = pendingBatchUpdate;
+  const { locationKey, changes, lockItems } = pendingBatchUpdate;
   const stock = locationStocks[locationKey];
   const now = Date.now();
 
@@ -2775,7 +2863,104 @@ function applyBatchUpdate(source) {
 
   upsertStocks(locationKey, Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
   insertLogs(locationKey, newLogEntries);
+
+  if (lockItems && lockItems.length) {
+    lockItems.forEach((item) => {
+      closingStockLocks[locationKey][item] = null;
+    });
+    upsertClosingStockLocks(locationKey, lockItems.map((item) => ({ item, stockUsed: null })));
+  }
+
   pendingBatchUpdate = null;
+  renderView(currentViewKey);
+}
+
+// Validates and stages the Closing Stock inputs for confirmation. Only acts
+// on items with a Closing Stock value that aren't already locked today; the
+// Add column is ignored entirely by this action.
+function handleClosingStockUpdateClick(container, categoryKey, locationKey) {
+  const section = container.querySelector(`[data-category="${categoryKey}"]`).closest('.inventory-column');
+  const errorEl = section.querySelector('.batch-update-error');
+  const closingLocks = closingStockLocks[locationKey];
+
+  section.querySelectorAll('.inventory-row').forEach((row) => row.classList.remove('invalid-batch-row'));
+  errorEl.hidden = true;
+
+  const closingChanges = [];
+  let hasInvalid = false;
+
+  section.querySelectorAll('.inventory-row').forEach((row) => {
+    const item = row.dataset.item;
+    if (Object.prototype.hasOwnProperty.call(closingLocks, item)) return;
+
+    const closingInput = row.querySelector('.batch-closing-input');
+    const raw = closingInput.value.trim();
+    if (raw === '') return;
+
+    const closingQty = Number(raw);
+    if (Number.isNaN(closingQty) || closingQty < 0) {
+      row.classList.add('invalid-batch-row');
+      hasInvalid = true;
+      return;
+    }
+    closingChanges.push({ item, closingQty });
+  });
+
+  if (hasInvalid) {
+    errorEl.textContent = 'Highlighted rows have an invalid Closing Stock value.';
+    errorEl.hidden = false;
+    return;
+  }
+  if (closingChanges.length === 0) return;
+
+  pendingClosingStockUpdate = { locationKey, closingChanges };
+  confirmMessage.textContent = 'Are you sure you want to update CLOSING stock?';
+  confirmRemoveBtn.textContent = 'Yes';
+  confirmOverlay.hidden = false;
+}
+
+// Applies the staged Closing Stock update after the user confirms: sets
+// current stock to the entered Closing Stock value, records the difference
+// as Stock Used, and locks the item's Add/Closing Stock inputs for the rest
+// of the day.
+function applyClosingStockUpdate() {
+  if (!pendingClosingStockUpdate) return;
+
+  const { locationKey, closingChanges } = pendingClosingStockUpdate;
+  const stock = locationStocks[locationKey];
+  const now = Date.now();
+
+  const stockChanges = new Map();
+  const newLogEntries = [];
+  const lockRows = [];
+
+  closingChanges.forEach(({ item, closingQty }, idx) => {
+    const currentQty = stock[item] || 0;
+    const stockUsed = roundToTwoDecimals(currentQty - closingQty);
+    stock[item] = roundToTwoDecimals(closingQty);
+    stockChanges.set(item, stock[item]);
+
+    const logEntry = {
+      timestamp: now + idx,
+      item,
+      actionType: stockUsed < 0 ? 'add' : 'subtract',
+      qty: Math.abs(stockUsed),
+      category: getCurrentUserRole(),
+      requestTag: 'Closing Stock Update',
+    };
+    locationLogs[locationKey].push(logEntry);
+    newLogEntries.push(logEntry);
+
+    closingStockLocks[locationKey][item] = stockUsed;
+    lockRows.push({ item, stockUsed });
+  });
+
+  upsertStocks(locationKey, Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs(locationKey, newLogEntries);
+  upsertClosingStockLocks(locationKey, lockRows);
+
+  pendingClosingStockUpdate = null;
+  closeConfirmDialog();
   renderView(currentViewKey);
 }
 
@@ -2840,7 +3025,13 @@ loginForm.addEventListener('submit', async (event) => {
   }
 });
 
-confirmRemoveBtn.addEventListener('click', confirmRemoval);
+confirmRemoveBtn.addEventListener('click', () => {
+  if (pendingClosingStockUpdate) {
+    applyClosingStockUpdate();
+  } else if (pendingRemoval) {
+    confirmRemoval();
+  }
+});
 confirmCancelBtn.addEventListener('click', closeConfirmDialog);
 
 stockSaveBtn.addEventListener('click', handleStockSave);

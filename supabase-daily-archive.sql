@@ -71,6 +71,7 @@ begin
   delete from logs;
   delete from warehouse_requests;
   delete from kitchen_requests;
+  delete from closing_stock_locks;
 
   -- 30-day retention: drop archives older than 30 days so they stop
   -- showing up (and taking up space) in the Archived Daily Logs list.

@@ -831,6 +831,10 @@ button {
   text-align: center;
 }
 
+.inventory-table-closing th:nth-child(5) {
+  text-align: center;
+}
+
 .inventory-table td {
   padding: 0.55rem 0.7rem;
   border-bottom: 1px solid var(--border-glass);
@@ -840,6 +844,10 @@ button {
 .inventory-table td:nth-child(2),
 .inventory-table td:nth-child(3),
 .inventory-table td:nth-child(4) {
+  text-align: center;
+}
+
+.inventory-table-closing td:nth-child(5) {
   text-align: center;
 }
 
@@ -899,6 +907,12 @@ button {
   margin-top: 0.75rem;
 }
 
+.batch-section-footer-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .update-stock-section-btn {
   padding: 0.55rem 1.2rem;
   border-radius: 12px;
@@ -916,6 +930,43 @@ button {
 
 .update-stock-section-btn:active {
   transform: scale(0.97);
+}
+
+.update-closing-stock-section-btn {
+  padding: 0.55rem 1.2rem;
+  border-radius: 12px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.85rem;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.update-closing-stock-section-btn:hover {
+  background: rgba(245, 158, 11, 0.26);
+}
+
+.update-closing-stock-section-btn:active {
+  transform: scale(0.97);
+}
+
+.locked-cell {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.inventory-stock-used {
+  display: inline-block;
+  min-width: 2.5rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid var(--border-glass);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.85rem;
+  text-align: center;
 }
 
 .inventory-item-qty {
