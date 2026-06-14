@@ -922,8 +922,8 @@ function buildIncomingRequestsSectionHtml(locationKey) {
                 <tr>
                   <th>Item</th>
                   <th>Quantity</th>
-                  <th>Status</th>
                   <th></th>
+                  <th>Status</th>
                   <th>Timestamp</th>
                 </tr>
               </thead>
@@ -932,8 +932,8 @@ function buildIncomingRequestsSectionHtml(locationKey) {
                   <tr data-status="${escapeHtml(request.status)}">
                     <td>${escapeHtml(request.item)}</td>
                     <td>${request.qty}</td>
-                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td>${buildWarehouseRequestActionButtonsHtml(request)}</td>
+                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
                   </tr>
                 `).join('')}
@@ -992,8 +992,8 @@ function renderAllRequestsSubtab() {
                   <th>From</th>
                   <th>Item</th>
                   <th>Quantity</th>
-                  <th>Status</th>
                   <th></th>
+                  <th>Status</th>
                   <th>Timestamp</th>
                 </tr>
               </thead>
@@ -1003,8 +1003,8 @@ function renderAllRequestsSubtab() {
                     <td>${escapeHtml(WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation)}</td>
                     <td>${escapeHtml(request.item)}</td>
                     <td>${request.qty}</td>
-                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td>${buildWarehouseRequestActionButtonsHtml(request)}</td>
+                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
                   </tr>
                 `).join('')}
@@ -1708,6 +1708,8 @@ function renderWarehouseRequestsPanel(container, locationKey) {
     .filter((request) => request.fromLocation === locationKey)
     .sort((a, b) => b.timestamp - a.timestamp);
 
+  const canMarkAllReceived = requests.some((request) => request.status === 'Dispatched');
+
   container.innerHTML = `
     <div class="warehouse-requests">
       <section class="request-form-card">
@@ -1719,7 +1721,10 @@ function renderWarehouseRequestsPanel(container, locationKey) {
       </section>
 
       <section class="requests-history">
-        <h3 class="requests-history-title">Requests to Warehouse</h3>
+        <div class="all-requests-toolbar">
+          <h3 class="requests-history-title">Requests to Warehouse</h3>
+          <button type="button" class="dispatch-all-btn mark-all-received-btn" ${canMarkAllReceived ? '' : 'disabled'}>Mark All as Received</button>
+        </div>
         ${requests.length
           ? `<div class="requests-table-wrap">
               <table class="requests-table">
@@ -1727,8 +1732,8 @@ function renderWarehouseRequestsPanel(container, locationKey) {
                   <tr>
                     <th>Item</th>
                     <th>Quantity</th>
-                    <th>Status</th>
                     <th></th>
+                    <th>Status</th>
                     <th>Timestamp</th>
                   </tr>
                 </thead>
@@ -1737,10 +1742,10 @@ function renderWarehouseRequestsPanel(container, locationKey) {
                     <tr data-status="${escapeHtml(request.status)}">
                       <td>${escapeHtml(request.item)}</td>
                       <td>${request.qty}</td>
-                      <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                       <td>${request.status === 'Dispatched'
                         ? `<button type="button" class="mark-received-btn" data-request-id="${request.id}">Mark as Received</button>`
                         : ''}</td>
+                      <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                       <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
                     </tr>
                   `).join('')}
@@ -1767,6 +1772,13 @@ function renderWarehouseRequestsPanel(container, locationKey) {
       handleMarkRequestReceived(Number(btn.dataset.requestId));
     });
   });
+
+  const markAllReceivedBtn = container.querySelector('.mark-all-received-btn');
+  if (markAllReceivedBtn) {
+    markAllReceivedBtn.addEventListener('click', () => {
+      handleMarkAllRequestsReceived(locationKey);
+    });
+  }
 
   if (locationKey === 'kitchen') {
     container.querySelectorAll('.dispatch-kitchen-action-btn').forEach((btn) => {
@@ -1822,8 +1834,8 @@ function buildIncomingWarehouseRequestsSectionHtml() {
                 <tr>
                   <th>Item</th>
                   <th>Quantity</th>
-                  <th>Status</th>
                   <th></th>
+                  <th>Status</th>
                   <th>Timestamp</th>
                 </tr>
               </thead>
@@ -1832,8 +1844,8 @@ function buildIncomingWarehouseRequestsSectionHtml() {
                   <tr data-status="${escapeHtml(request.status)}">
                     <td>${escapeHtml(request.item)}</td>
                     <td>${request.qty}</td>
-                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td>${buildIncomingKitchenRequestActionButtonsHtml(request)}</td>
+                    <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                     <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
                   </tr>
                 `).join('')}
@@ -1895,6 +1907,45 @@ function handleMarkRequestReceived(requestId) {
   };
   locationLogs[request.fromLocation].push(logEntry);
   insertLogs(request.fromLocation, [logEntry]);
+
+  rerenderPreservingScroll();
+}
+
+// Sweeps every Dispatched request for this location and marks them all
+// Received in one go, mirroring handleMarkRequestReceived's stock/log updates
+// for each one.
+function handleMarkAllRequestsReceived(locationKey) {
+  const dispatchedRequests = warehouseRequests.filter(
+    (request) => request.fromLocation === locationKey && request.status === 'Dispatched'
+  );
+
+  if (!dispatchedRequests.length) return;
+
+  const stock = locationStocks[locationKey];
+  const stockChanges = new Map();
+  const newLogEntries = [];
+
+  dispatchedRequests.forEach((request) => {
+    request.status = 'Received';
+
+    stock[request.item] = roundToTwoDecimals((stock[request.item] || 0) + request.qty);
+    stockChanges.set(request.item, stock[request.item]);
+
+    newLogEntries.push({
+      timestamp: Date.now(),
+      item: request.item,
+      actionType: 'add',
+      qty: request.qty,
+      category: getCurrentUserRole(),
+      requestTag: 'Warehouse Request',
+    });
+  });
+
+  locationLogs[locationKey].push(...newLogEntries);
+
+  updateWarehouseRequests(dispatchedRequests);
+  upsertStocks(locationKey, Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs(locationKey, newLogEntries);
 
   rerenderPreservingScroll();
 }
