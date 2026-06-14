@@ -912,9 +912,18 @@ function buildIncomingRequestsSectionHtml(locationKey) {
     .filter((request) => request.fromLocation === locationKey)
     .sort((a, b) => b.timestamp - a.timestamp);
 
+  const allPendingRequests = warehouseRequests.filter((request) => request.status === 'Pending');
+  const dispatchableItems = getFullyDispatchableItemTotals(allPendingRequests, locationStocks.warehouse);
+  const canDispatchAny = requests.some((request) => (
+    request.status === 'Pending' && dispatchableItems.has(request.item)
+  ));
+
   return `
     <section class="requests-history">
-      <h3 class="requests-history-title">Requests from ${escapeHtml(locationLabel)}</h3>
+      <div class="all-requests-toolbar">
+        <h3 class="requests-history-title">Requests from ${escapeHtml(locationLabel)}</h3>
+        <button type="button" class="dispatch-all-btn dispatch-all-location-btn" data-location="${locationKey}" ${canDispatchAny ? '' : 'disabled'}>Dispatch All Possible</button>
+      </div>
       ${requests.length
         ? `<div class="requests-table-wrap">
             <table class="requests-table">
@@ -957,6 +966,10 @@ function wireIncomingRequestActionListeners(container) {
   container.querySelectorAll('.reject-request-btn').forEach((btn) => {
     btn.addEventListener('click', () => handleRejectRequest(Number(btn.dataset.requestId)));
   });
+
+  container.querySelectorAll('.dispatch-all-location-btn').forEach((btn) => {
+    btn.addEventListener('click', () => handleDispatchAllRequestsForLocation(btn.dataset.location));
+  });
 }
 
 // Warehouse-side view of a single location's requests — lets Warehouse staff
@@ -972,11 +985,29 @@ function renderIncomingRequestsPanel(locationKey) {
 // staff don't have to hop between per-location subtabs to action them. Includes
 // a "Dispatch All Possible" button that sweeps through every Pending request and
 // sends whatever it can — fully where stock allows, partially up to the max otherwise.
+// Groups Pending requests by item and keeps only the items where the combined
+// quantity requested across every location can be fully covered by the given
+// stock — used by "Dispatch All Possible" so it dispatches an item to
+// everyone who asked for it, or not at all, never leaving some requesters
+// short while others are fulfilled.
+function getFullyDispatchableItemTotals(pendingRequests, stock) {
+  const totalsByItem = new Map();
+  pendingRequests.forEach((request) => {
+    totalsByItem.set(request.item, roundToTwoDecimals((totalsByItem.get(request.item) || 0) + request.qty));
+  });
+
+  const dispatchable = new Map();
+  totalsByItem.forEach((totalRequested, item) => {
+    if (totalRequested <= (stock[item] || 0)) dispatchable.set(item, totalRequested);
+  });
+
+  return dispatchable;
+}
+
 function renderAllRequestsSubtab() {
   const requests = [...warehouseRequests].sort((a, b) => b.timestamp - a.timestamp);
-  const canDispatchAny = requests.some((request) => (
-    request.status === 'Pending' && (locationStocks.warehouse[request.item] || 0) > 0
-  ));
+  const pendingRequests = requests.filter((request) => request.status === 'Pending');
+  const canDispatchAny = getFullyDispatchableItemTotals(pendingRequests, locationStocks.warehouse).size > 0;
 
   warehouseSubtabContent.innerHTML = `
     <div class="all-requests-panel">
@@ -1021,48 +1052,93 @@ function renderAllRequestsSubtab() {
   if (dispatchAllBtn) dispatchAllBtn.addEventListener('click', handleDispatchAllRequests);
 }
 
-// Sweeps every Pending request (oldest first, so earlier requesters get first
-// claim on limited stock) and sends whatever the warehouse can spare — fully
-// when there's enough, otherwise shrinking the request down to whatever's left,
-// mirroring the single-request Dispatch / Send Partial flows.
+// For each item with Pending requests, checks whether the warehouse holds
+// enough to cover everyone who asked for it (summed across all locations) —
+// if so, dispatches all of those requests in full; if not, leaves every
+// request for that item Pending so no one is short-changed while others are
+// fulfilled.
 function handleDispatchAllRequests() {
-  const pendingRequests = warehouseRequests
-    .filter((request) => request.status === 'Pending')
-    .sort((a, b) => a.timestamp - b.timestamp);
+  const pendingRequests = warehouseRequests.filter((request) => request.status === 'Pending');
 
   const stock = locationStocks.warehouse;
+  const dispatchableTotals = getFullyDispatchableItemTotals(pendingRequests, stock);
+  if (!dispatchableTotals.size) return;
+
   const dispatchedRequests = [];
   const stockChanges = new Map();
   const newLogEntries = [];
 
-  pendingRequests.forEach((request) => {
-    const availableQty = stock[request.item] || 0;
-    if (availableQty <= 0) return;
+  dispatchableTotals.forEach((totalRequested, item) => {
+    pendingRequests
+      .filter((request) => request.item === item)
+      .forEach((request) => {
+        request.status = 'Dispatched';
+        dispatchedRequests.push(request);
 
-    const sendQty = roundToTwoDecimals(Math.min(availableQty, request.qty));
-    const isPartial = sendQty < request.qty;
+        const logEntry = {
+          timestamp: Date.now(),
+          item: request.item,
+          actionType: 'subtract',
+          qty: request.qty,
+          category: getCurrentUserRole(),
+          requestTag: `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
+        };
+        locationLogs.warehouse.push(logEntry);
+        newLogEntries.push(logEntry);
+      });
 
-    if (isPartial) request.qty = sendQty;
-    request.status = 'Dispatched';
-
-    stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
-    stockChanges.set(request.item, stock[request.item]);
-
-    const logEntry = {
-      timestamp: Date.now(),
-      item: request.item,
-      actionType: 'subtract',
-      qty: sendQty,
-      category: getCurrentUserRole(),
-      requestTag: isPartial
-        ? `Partial dispatch to ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`
-        : `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
-    };
-    locationLogs.warehouse.push(logEntry);
-    newLogEntries.push(logEntry);
-
-    dispatchedRequests.push(request);
+    stock[item] = roundToTwoDecimals((stock[item] || 0) - totalRequested);
+    stockChanges.set(item, stock[item]);
   });
+
+  updateWarehouseRequests(dispatchedRequests);
+  upsertStocks('warehouse', Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs('warehouse', newLogEntries);
+
+  rerenderPreservingScroll();
+}
+
+// Per-location "Dispatch All Possible" — same dispatchability check as
+// handleDispatchAllRequests (an item only qualifies if the warehouse can
+// cover the total requested for it across every location), but only
+// dispatches and deducts stock for this location's own requests, leaving
+// other locations' requests for the same item untouched.
+function handleDispatchAllRequestsForLocation(locationKey) {
+  const pendingRequests = warehouseRequests.filter((request) => request.status === 'Pending');
+
+  const stock = locationStocks.warehouse;
+  const dispatchableTotals = getFullyDispatchableItemTotals(pendingRequests, stock);
+  if (!dispatchableTotals.size) return;
+
+  const dispatchedRequests = [];
+  const stockChanges = new Map();
+  const newLogEntries = [];
+
+  for (const item of dispatchableTotals.keys()) {
+    const locationRequests = pendingRequests.filter((request) => request.item === item && request.fromLocation === locationKey);
+    if (!locationRequests.length) continue;
+
+    let dispatchedQty = 0;
+    locationRequests.forEach((request) => {
+      request.status = 'Dispatched';
+      dispatchedRequests.push(request);
+      dispatchedQty += request.qty;
+
+      const logEntry = {
+        timestamp: Date.now(),
+        item: request.item,
+        actionType: 'subtract',
+        qty: request.qty,
+        category: getCurrentUserRole(),
+        requestTag: `Request from ${WAREHOUSE_SUBTAB_LABELS[request.fromLocation] || request.fromLocation}`,
+      };
+      locationLogs.warehouse.push(logEntry);
+      newLogEntries.push(logEntry);
+    });
+
+    stock[item] = roundToTwoDecimals((stock[item] || 0) - dispatchedQty);
+    stockChanges.set(item, stock[item]);
+  }
 
   if (!dispatchedRequests.length) return;
 
@@ -1073,11 +1149,57 @@ function handleDispatchAllRequests() {
   rerenderPreservingScroll();
 }
 
+// Mirrors handleDispatchAllRequests for Kitchen's "Incoming Warehouse Requests"
+// panel — since Warehouse is the only requester here, this just checks each
+// item's total Pending "Ask Kitchen" quantity against Kitchen's own stock and
+// dispatches it in full, or leaves it Pending entirely.
+function handleDispatchAllKitchenRequests() {
+  const pendingRequests = kitchenRequests.filter((request) => request.status === 'Pending');
+
+  const stock = locationStocks.kitchen;
+  const dispatchableTotals = getFullyDispatchableItemTotals(pendingRequests, stock);
+  if (!dispatchableTotals.size) return;
+
+  const dispatchedRequests = [];
+  const stockChanges = new Map();
+  const newLogEntries = [];
+
+  dispatchableTotals.forEach((totalRequested, item) => {
+    pendingRequests
+      .filter((request) => request.item === item)
+      .forEach((request) => {
+        request.status = 'Dispatched';
+        dispatchedRequests.push(request);
+
+        const logEntry = {
+          timestamp: Date.now(),
+          item: request.item,
+          actionType: 'subtract',
+          qty: request.qty,
+          category: getCurrentUserRole(),
+          requestTag: 'Dispatched to Warehouse',
+        };
+        locationLogs.kitchen.push(logEntry);
+        newLogEntries.push(logEntry);
+      });
+
+    stock[item] = roundToTwoDecimals((stock[item] || 0) - totalRequested);
+    stockChanges.set(item, stock[item]);
+  });
+
+  updateKitchenRequests(dispatchedRequests);
+  upsertStocks('kitchen', Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs('kitchen', newLogEntries);
+
+  rerenderPreservingScroll();
+}
+
 // Kitchen subtab shows the usual "Requests from Kitchen" panel, plus a form
 // letting Warehouse staff ask Kitchen to make processed items, plus a history
 // of those outgoing requests.
 function renderKitchenSubtabContent() {
   const outgoingRequests = [...kitchenRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const canMarkAllReceived = outgoingRequests.some((request) => request.status === 'Dispatched');
 
   warehouseSubtabContent.innerHTML = `
     <div class="warehouse-requests">
@@ -1092,7 +1214,10 @@ function renderKitchenSubtabContent() {
       </section>
 
       <section class="requests-history">
-        <h3 class="requests-history-title">Requests to Kitchen</h3>
+        <div class="all-requests-toolbar">
+          <h3 class="requests-history-title">Requests to Kitchen</h3>
+          <button type="button" class="dispatch-all-btn mark-all-received-kitchen-btn" ${canMarkAllReceived ? '' : 'disabled'}>Mark All as Received</button>
+        </div>
         ${outgoingRequests.length
           ? `<div class="requests-table-wrap">
               <table class="requests-table">
@@ -1100,15 +1225,19 @@ function renderKitchenSubtabContent() {
                   <tr>
                     <th>Item</th>
                     <th>Quantity</th>
+                    <th></th>
                     <th>Status</th>
                     <th>Timestamp</th>
                   </tr>
                 </thead>
                 <tbody>
                   ${outgoingRequests.map((request) => `
-                    <tr>
+                    <tr data-status="${escapeHtml(request.status)}">
                       <td>${escapeHtml(request.item)}</td>
                       <td>${request.qty}</td>
+                      <td>${request.status === 'Dispatched'
+                        ? `<button type="button" class="mark-received-btn mark-received-kitchen-btn" data-request-id="${request.id}">Mark as Received</button>`
+                        : ''}</td>
                       <td><span class="${REQUEST_STATUS_BADGE_CLASSES[request.status] || 'status-badge'}">${escapeHtml(request.status)}</span></td>
                       <td class="request-timestamp-cell">${formatLogTimestamp(request.timestamp)}</td>
                     </tr>
@@ -1130,6 +1259,17 @@ function renderKitchenSubtabContent() {
   kitchenRequestFormCard.querySelector('.submit-kitchen-request-btn').addEventListener('click', () => {
     handleSubmitKitchenRequestTable(kitchenRequestFormCard);
   });
+
+  warehouseSubtabContent.querySelectorAll('.mark-received-kitchen-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      handleMarkKitchenRequestReceived(Number(btn.dataset.requestId));
+    });
+  });
+
+  const markAllReceivedKitchenBtn = warehouseSubtabContent.querySelector('.mark-all-received-kitchen-btn');
+  if (markAllReceivedKitchenBtn) {
+    markAllReceivedKitchenBtn.addEventListener('click', handleMarkAllKitchenRequestsReceived);
+  }
 }
 
 // Re-renders the current view without losing the user's place in a long
@@ -1363,9 +1503,7 @@ function confirmPartialKitchenDispatch() {
   updateKitchenRequests([request]);
 
   stock[request.item] = roundToTwoDecimals(availableQty - sendQty);
-  locationStocks.warehouse[request.item] = roundToTwoDecimals((locationStocks.warehouse[request.item] || 0) + sendQty);
   upsertStocks('kitchen', [{ item: request.item, qty: stock[request.item] }]);
-  upsertStocks('warehouse', [{ item: request.item, qty: locationStocks.warehouse[request.item] }]);
 
   const kitchenLogEntry = {
     timestamp: Date.now(),
@@ -1375,18 +1513,8 @@ function confirmPartialKitchenDispatch() {
     category: getCurrentUserRole(),
     requestTag: 'Partial dispatch to Warehouse',
   };
-  const warehouseLogEntry = {
-    timestamp: Date.now(),
-    item: request.item,
-    actionType: 'add',
-    qty: sendQty,
-    category: getCurrentUserRole(),
-    requestTag: 'Partial receipt from Kitchen',
-  };
   locationLogs.kitchen.push(kitchenLogEntry);
-  locationLogs.warehouse.push(warehouseLogEntry);
   insertLogs('kitchen', [kitchenLogEntry]);
-  insertLogs('warehouse', [warehouseLogEntry]);
 
   closePartialDispatchModal();
   rerenderPreservingScroll();
@@ -1792,6 +1920,11 @@ function renderWarehouseRequestsPanel(container, locationKey) {
     container.querySelectorAll('.reject-kitchen-action-btn').forEach((btn) => {
       btn.addEventListener('click', () => handleRejectKitchenRequest(Number(btn.dataset.requestId)));
     });
+
+    const dispatchAllKitchenBtn = container.querySelector('.dispatch-all-kitchen-btn');
+    if (dispatchAllKitchenBtn) {
+      dispatchAllKitchenBtn.addEventListener('click', handleDispatchAllKitchenRequests);
+    }
   }
 }
 
@@ -1823,10 +1956,15 @@ function buildIncomingKitchenRequestActionButtonsHtml(request) {
 
 function buildIncomingWarehouseRequestsSectionHtml() {
   const requests = [...kitchenRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const pendingRequests = requests.filter((request) => request.status === 'Pending');
+  const canDispatchAny = getFullyDispatchableItemTotals(pendingRequests, locationStocks.kitchen).size > 0;
 
   return `
     <section class="requests-history">
-      <h3 class="requests-history-title">Incoming Warehouse Requests</h3>
+      <div class="all-requests-toolbar">
+        <h3 class="requests-history-title">Incoming Warehouse Requests</h3>
+        <button type="button" class="dispatch-all-btn dispatch-all-kitchen-btn" ${canDispatchAny ? '' : 'disabled'}>Dispatch All Possible</button>
+      </div>
       ${requests.length
         ? `<div class="requests-table-wrap">
             <table class="requests-table">
@@ -1950,6 +2088,69 @@ function handleMarkAllRequestsReceived(locationKey) {
   rerenderPreservingScroll();
 }
 
+// Mirrors handleMarkRequestReceived for the Kitchen->Warehouse leg of an "Ask
+// Kitchen" request — Kitchen has already dispatched (decreasing its own
+// stock), Warehouse now confirms receipt and adds the items to its own stock.
+function handleMarkKitchenRequestReceived(requestId) {
+  const request = kitchenRequests.find((entry) => entry.id === requestId);
+  if (!request || request.status !== 'Dispatched') return;
+
+  request.status = 'Received';
+  updateKitchenRequests([request]);
+
+  const stock = locationStocks.warehouse;
+  stock[request.item] = roundToTwoDecimals((stock[request.item] || 0) + request.qty);
+  upsertStocks('warehouse', [{ item: request.item, qty: stock[request.item] }]);
+
+  const logEntry = {
+    timestamp: Date.now(),
+    item: request.item,
+    actionType: 'add',
+    qty: request.qty,
+    category: getCurrentUserRole(),
+    requestTag: 'Received from Kitchen',
+  };
+  locationLogs.warehouse.push(logEntry);
+  insertLogs('warehouse', [logEntry]);
+
+  rerenderPreservingScroll();
+}
+
+// Sweeps every Dispatched "Ask Kitchen" request and marks them all Received in
+// one go, mirroring handleMarkAllRequestsReceived's stock/log updates.
+function handleMarkAllKitchenRequestsReceived() {
+  const dispatchedRequests = kitchenRequests.filter((request) => request.status === 'Dispatched');
+  if (!dispatchedRequests.length) return;
+
+  const stock = locationStocks.warehouse;
+  const stockChanges = new Map();
+  const newLogEntries = [];
+
+  dispatchedRequests.forEach((request) => {
+    request.status = 'Received';
+
+    stock[request.item] = roundToTwoDecimals((stock[request.item] || 0) + request.qty);
+    stockChanges.set(request.item, stock[request.item]);
+
+    newLogEntries.push({
+      timestamp: Date.now(),
+      item: request.item,
+      actionType: 'add',
+      qty: request.qty,
+      category: getCurrentUserRole(),
+      requestTag: 'Received from Kitchen',
+    });
+  });
+
+  locationLogs.warehouse.push(...newLogEntries);
+
+  updateKitchenRequests(dispatchedRequests);
+  upsertStocks('warehouse', Array.from(stockChanges, ([item, qty]) => ({ item, qty })));
+  insertLogs('warehouse', newLogEntries);
+
+  rerenderPreservingScroll();
+}
+
 // Reads the "Request Qty" table inside the Ask Kitchen for Processed Items
 // card and queues a Pending request for every item with a quantity entered.
 function handleSubmitKitchenRequestTable(formCard) {
@@ -1988,10 +2189,8 @@ function handleDispatchKitchenRequest(requestId) {
   request.status = 'Dispatched';
   updateKitchenRequests([request]);
 
-  kitchenStock[request.item] = availableQty - request.qty;
-  locationStocks.warehouse[request.item] = (locationStocks.warehouse[request.item] || 0) + request.qty;
+  kitchenStock[request.item] = roundToTwoDecimals(availableQty - request.qty);
   upsertStocks('kitchen', [{ item: request.item, qty: kitchenStock[request.item] }]);
-  upsertStocks('warehouse', [{ item: request.item, qty: locationStocks.warehouse[request.item] }]);
 
   const kitchenLogEntry = {
     timestamp: Date.now(),
@@ -2001,18 +2200,8 @@ function handleDispatchKitchenRequest(requestId) {
     category: getCurrentUserRole(),
     requestTag: 'Dispatched to Warehouse',
   };
-  const warehouseLogEntry = {
-    timestamp: Date.now(),
-    item: request.item,
-    actionType: 'add',
-    qty: request.qty,
-    category: getCurrentUserRole(),
-    requestTag: 'Received from Kitchen',
-  };
   locationLogs.kitchen.push(kitchenLogEntry);
-  locationLogs.warehouse.push(warehouseLogEntry);
   insertLogs('kitchen', [kitchenLogEntry]);
-  insertLogs('warehouse', [warehouseLogEntry]);
 
   rerenderPreservingScroll();
 }
