@@ -14,6 +14,8 @@ const authSignupClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANO
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// Display names for each role/location, used throughout the UI (nav
+// labels, log entries, request "from"/"to" tags, CSV headers, etc.).
 const ROLE_LABELS = {
   manager: 'Manager',
   warehouse: 'Warehouse',
@@ -24,9 +26,15 @@ const ROLE_LABELS = {
   kitchen: 'Kitchen',
 };
 
+// Every nav view in the app, and the subset of those views that are a
+// single location's own inventory (each gets a "General Inventory" +
+// "Warehouse" subtab pair via renderLocationView).
 const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'kitchen'];
 const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
 
+// Which nav views each role is allowed to see — applyRoleAccess() hides
+// every nav button not listed here for the signed-in role. Only 'manager'
+// gets the 'items' (catalog) and 'users' views.
 const ROLE_ACCESS = {
   manager: [...ALL_VIEWS, 'users'],
   warehouse: ['warehouse'],
@@ -44,10 +52,26 @@ const ROLE_ACCESS = {
 // is handled by supabaseClient (it stores its own session in localStorage).
 let currentUserRole = null;
 let currentUsername = null;
+
+// Item awaiting confirmation in the shared confirm dialog (#confirm-overlay):
+// { category, index } for catalog item removal. Mutually exclusive with
+// pendingClosingStockUpdate — see closeConfirmDialog().
 let pendingRemoval = null;
+
+// Catalog item currently being renamed via the Edit Item modal:
+// { category, index, oldName }. See handleEditItem/handleEditItemSave.
 let pendingEdit = null;
+
+// Set while the "Not Enough Stock to Dispatch" modal is open, recording
+// which request/flow it belongs to: { source: 'warehouse' | 'kitchen',
+// requestId, requestedQty }. See openPartialDispatchModal(WithInfo) and
+// confirmPartial(Warehouse|Kitchen)Dispatch.
 let pendingPartialDispatch = null;
+
+// The nav view key currently being rendered (e.g. 'warehouse', 'kitchen') —
+// used by renderView(currentViewKey) to re-render after a mutation.
 let currentViewKey = null;
+
 let pendingBatchUpdate = null; // { locationKey, changes: [{ item, actionType, qty }], lockItems: [item, ...] }
 let pendingClosingStockUpdate = null; // { locationKey, closingChanges: [{ item, closingQty }] }
 let pendingLoginProfile = null; // profile to retry entering after a failed initial Supabase load
@@ -57,6 +81,10 @@ let pendingLoginProfile = null; // profile to retry entering after a failed init
 // the app has a valid shape to render before that fetch resolves.
 let itemsCatalog = { raw: [], processed: [] };
 
+// Which subtab is active within the Warehouse nav view ('general',
+// 'requests', 'kitchen', 'shop1'..'shop4' — see renderWarehouseView) and
+// within a single location's nav view ('general' or 'warehouse' — see
+// renderLocationView).
 let activeWarehouseSubtab = 'general';
 let activeLocationSubtab = 'general';
 
@@ -130,6 +158,12 @@ const confirmMessage = document.getElementById('confirm-message');
 const confirmRemoveBtn = document.getElementById('confirm-remove-btn');
 const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
 
+// NOTE: This single-item "Update Stock" modal (#stock-modal) is currently
+// unused — it was superseded by the per-row batch update UI in
+// renderInventoryDashboard (Add/Remove or Add/Closing Stock columns +
+// "Update Stock"/"Update Closing Stock" buttons). The markup, these refs,
+// and their handlers in the "Stock Update Modal" section below are kept in
+// case this flow is reintroduced, but nothing currently opens this modal.
 const stockModal = document.getElementById('stock-modal');
 const stockItemSearch = document.getElementById('stock-item-search');
 const stockItemSuggestions = document.getElementById('stock-item-suggestions');
@@ -431,6 +465,11 @@ async function renameCatalogItemEverywhere(category, oldName, newName, mergedSto
 
 // ===================== App Shell / Views =====================
 
+// Called once after a successful login (or session restore). Loads all
+// app data from Supabase behind the loading overlay, then reveals the app
+// shell and renders the signed-in role's first allowed view. If the load
+// fails, shows a "Retry" button that calls enterApp(pendingLoginProfile)
+// again — see the dataLoadingRetryBtn listener near the bottom of the file.
 async function enterApp(profile) {
   const { role, username } = profile;
   currentUserRole = role;
@@ -463,6 +502,8 @@ async function enterApp(profile) {
   }
 }
 
+// Shows/hides sidebar nav buttons based on ROLE_ACCESS for the signed-in
+// role, and returns the list of view keys that role is allowed to see.
 function applyRoleAccess(role) {
   const allowedViews = ROLE_ACCESS[role] || [];
 
@@ -474,6 +515,10 @@ function applyRoleAccess(role) {
   return allowedViews;
 }
 
+// Central router: switches the main content area to the given nav view
+// (one of ALL_VIEWS, or 'users'), updates the active nav button/title, and
+// delegates to that view's render function. Every mutation handler that
+// needs to refresh the screen calls renderView(currentViewKey).
 function renderView(viewKey) {
   currentViewKey = viewKey;
 
@@ -541,6 +586,10 @@ function getActiveLocationKey() {
   return WAREHOUSE_SUBTAB_LOCATIONS[activeWarehouseSubtab] || activeWarehouseSubtab;
 }
 
+// Manager-only "Items" view: lets the manager maintain the master catalog
+// (raw vs processed items) that every location's stock/log/request UI is
+// built from. Each category card has a search box, an "add item" form, and
+// a numbered list with Edit/Remove buttons per item.
 function renderItemsView() {
   viewContent.innerHTML = `
     <div class="items-dashboard">
@@ -627,6 +676,10 @@ function handleAddItem(form) {
   renderView('items');
 }
 
+// Edit-item-name flow: opens the "Edit Item Name" modal pre-filled with the
+// current name. handleEditItemSave validates (non-empty, no duplicate within
+// the category) before committing via renameItemEverywhere, which is the
+// part that actually cascades the rename across stocks/logs/requests.
 function handleEditItem(category, index) {
   const oldName = itemsCatalog[category][index];
   if (oldName === undefined) return;
@@ -716,6 +769,13 @@ function renameItemEverywhere(category, oldName, newName) {
   renameCatalogItemEverywhere(category, oldName, newName, mergedStocks);
 }
 
+// Remove-item flow: handleRemoveItem opens the shared "Remove this item?"
+// confirm dialog (#confirm-overlay, also reused for the closing-stock confirm
+// below) and stashes which item via pendingRemoval; confirmRemoval is the
+// dialog's "Remove" button handler and does the actual catalog deletion.
+// Note: this only removes the item from the catalog list — any existing
+// stock/log/request rows for it are left as-is (same as a rename that's
+// never applied to those rows).
 function handleRemoveItem(category, index) {
   const itemName = itemsCatalog[category][index];
   if (itemName === undefined) return;
@@ -743,6 +803,9 @@ function confirmRemoval() {
   renderView('items');
 }
 
+// Renders a string as plain text and reads back the escaped HTML, so
+// user-entered names (item names, usernames, etc.) can be safely interpolated
+// into innerHTML templates without risking HTML/script injection.
 function escapeHtml(value) {
   const div = document.createElement('div');
   div.textContent = value;
@@ -808,6 +871,9 @@ function renderUsersView() {
   refreshUsersList();
 }
 
+// Fetches every row from the `profiles` table (id, email, username, role) for
+// display in the Users view. Returns an empty array on error so the UI can
+// just show "No users yet" rather than crashing.
 async function fetchAllProfiles() {
   const { data, error } = await supabaseClient.from('profiles').select('id, email, username, role').order('username');
   if (error || !data) return [];
@@ -838,6 +904,13 @@ async function refreshUsersList() {
   listEl.innerHTML = renderUsersListHtml(profiles);
 }
 
+// Add User form handler. Creates a Supabase Auth account (email + password)
+// via authSignupClient, then inserts a matching `profiles` row with the
+// chosen username/role. authSignupClient is a separate Supabase client (see
+// Config) so that signUp() doesn't replace the manager's own logged-in
+// session on this client. If the profile insert fails after the auth account
+// was created, the account exists but has no role — the error message says
+// so explicitly so the manager knows to investigate.
 async function handleCreateUser(form, errorEl, successEl) {
   errorEl.hidden = true;
   successEl.hidden = true;
@@ -907,6 +980,19 @@ const REQUEST_STATUS_BADGE_CLASSES = {
   Rejected: 'status-badge status-rejected',
 };
 
+// Group order for every requests table in the app: Pending requests need
+// action first, Dispatched are in progress, Received/Rejected are done.
+// Within each status group, newest first.
+const REQUEST_STATUS_SORT_ORDER = { Pending: 0, Dispatched: 1, Received: 2, Rejected: 3 };
+
+function sortRequestsByStatusThenTime(requests) {
+  return [...requests].sort((a, b) => {
+    const statusDiff = (REQUEST_STATUS_SORT_ORDER[a.status] ?? 99) - (REQUEST_STATUS_SORT_ORDER[b.status] ?? 99);
+    if (statusDiff !== 0) return statusDiff;
+    return b.timestamp - a.timestamp;
+  });
+}
+
 // Decides which action button(s) a Pending request from a Shop/Kitchen gets:
 //   - enough stock      -> Partial + Dispatch + Reject (can choose to send all or less)
 //   - some stock, not enough -> Partial + Reject (can only send what's available)
@@ -936,9 +1022,9 @@ function buildWarehouseRequestActionButtonsHtml(request) {
 function buildIncomingRequestsSectionHtml(locationKey) {
   const locationLabel = WAREHOUSE_SUBTAB_LABELS[locationKey] || locationKey;
 
-  const requests = warehouseRequests
-    .filter((request) => request.fromLocation === locationKey)
-    .sort((a, b) => b.timestamp - a.timestamp);
+  const requests = sortRequestsByStatusThenTime(
+    warehouseRequests.filter((request) => request.fromLocation === locationKey)
+  );
 
   const allPendingRequests = warehouseRequests.filter((request) => request.status === 'Pending');
   const dispatchableItems = getFullyDispatchableItemTotals(allPendingRequests, locationStocks.warehouse);
@@ -1033,7 +1119,7 @@ function getFullyDispatchableItemTotals(pendingRequests, stock) {
 }
 
 function renderAllRequestsSubtab() {
-  const requests = [...warehouseRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const requests = sortRequestsByStatusThenTime(warehouseRequests);
   const pendingRequests = requests.filter((request) => request.status === 'Pending');
   const canDispatchAny = getFullyDispatchableItemTotals(pendingRequests, locationStocks.warehouse).size > 0;
 
@@ -1226,7 +1312,7 @@ function handleDispatchAllKitchenRequests() {
 // letting Warehouse staff ask Kitchen to make processed items, plus a history
 // of those outgoing requests.
 function renderKitchenSubtabContent() {
-  const outgoingRequests = [...kitchenRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const outgoingRequests = sortRequestsByStatusThenTime(kitchenRequests);
   const canMarkAllReceived = outgoingRequests.some((request) => request.status === 'Dispatched');
 
   warehouseSubtabContent.innerHTML = `
@@ -1895,9 +1981,9 @@ function collectRequestQtyEntries(formCard) {
 }
 
 function renderWarehouseRequestsPanel(container, locationKey) {
-  const requests = warehouseRequests
-    .filter((request) => request.fromLocation === locationKey)
-    .sort((a, b) => b.timestamp - a.timestamp);
+  const requests = sortRequestsByStatusThenTime(
+    warehouseRequests.filter((request) => request.fromLocation === locationKey)
+  );
 
   const canMarkAllReceived = requests.some((request) => request.status === 'Dispatched');
 
@@ -2018,7 +2104,7 @@ function buildIncomingKitchenRequestActionButtonsHtml(request) {
 }
 
 function buildIncomingWarehouseRequestsSectionHtml() {
-  const requests = [...kitchenRequests].sort((a, b) => b.timestamp - a.timestamp);
+  const requests = sortRequestsByStatusThenTime(kitchenRequests);
   const pendingRequests = requests.filter((request) => request.status === 'Pending');
   const canDispatchAny = getFullyDispatchableItemTotals(pendingRequests, locationStocks.kitchen).size > 0;
 
@@ -2476,11 +2562,18 @@ function classifyLogEntry(log, locationKey) {
 // daily_stock_snapshots (already classified by source and finalized as of
 // midnight IST — see archive_and_clear_daily / snapshot_end_of_day in
 // supabase-monthly-sheets.sql), used for any day before today. If `liveData`
-// is provided ({ logs, stocks }), the LAST day (dayCount) is instead built
-// from today's live, not-yet-finalized locationLogs/locationStocks via
-// classifyLogEntry — used for "current month so far" downloads.
-function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData) {
+// is provided ({ logs, stocks, closingStockLocks }), the LAST day (dayCount)
+// is instead built from today's live, not-yet-finalized
+// locationLogs/locationStocks/closingStockLocks via classifyLogEntry — used
+// for "current month so far" downloads.
+//
+// `closingStockRows` are rows from daily_closing_stock (see
+// supabase-stock-used-csv.sql), used to fill the "Stock Used" column for any
+// day before today. Shop 1-4 / Kitchen only — Warehouse has no Closing Stock
+// concept and gets no "Stock Used" column.
+function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData, closingStockRows) {
   const allItems = [...getCatalogItemNames()].sort((a, b) => a.localeCompare(b));
+  const showStockUsed = locationKey !== 'warehouse';
 
   // Source breakdown columns differ by location type.
   // Warehouse sees its own updates plus transfers to/from each other location.
@@ -2495,10 +2588,10 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
     return WAREHOUSE_SUBTAB_LABELS[src] || src;
   });
 
-  // Each day contributes: [added sources... | Added Total] + [subtracted sources... | Subtracted Total] + End of Day Total
+  // Each day contributes: [added sources... | Added Total] + [subtracted sources... | Subtracted Total] + End of Day Total + (Stock Used, if shown)
   const addedCols = [...sourceColLabels, 'Total'];
   const subtractedCols = [...sourceColLabels, 'Total'];
-  const totalDataColsPerDay = addedCols.length + subtractedCols.length + 1;
+  const totalDataColsPerDay = addedCols.length + subtractedCols.length + 1 + (showStockUsed ? 1 : 0);
 
   const initSources = () => {
     const init = {};
@@ -2508,11 +2601,13 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
 
   const dailyActivities = [];
   const dailyTotals = [];
+  const dailyStockUsed = [];
 
   for (let day = 1; day <= dayCount; day += 1) {
     const dateStr = formatLogDate(new Date(year, month, day));
     const activity = new Map();
     const totals = {};
+    const stockUsed = new Map();
 
     if (liveData && day === dayCount) {
       // `liveData.logs` is whatever's currently in the `logs` table, which can
@@ -2531,6 +2626,12 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
         bucket[targetSource] = (bucket[targetSource] || 0) + log.qty;
       });
       Object.assign(totals, liveData.stocks);
+
+      if (showStockUsed && liveData.closingStockLocks) {
+        Object.entries(liveData.closingStockLocks).forEach(([item, used]) => {
+          if (used !== null && used !== undefined) stockUsed.set(item, used);
+        });
+      }
     } else {
       activityRows.forEach((row) => {
         if (row.activity_date !== dateStr) return;
@@ -2545,10 +2646,17 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
       snapshotRows.forEach((row) => {
         if (row.activity_date === dateStr) totals[row.item_name] = Number(row.qty);
       });
+
+      if (showStockUsed && closingStockRows) {
+        closingStockRows.forEach((row) => {
+          if (row.activity_date === dateStr) stockUsed.set(row.item_name, Number(row.stock_used));
+        });
+      }
     }
 
     dailyActivities.push(activity);
     dailyTotals.push(totals);
+    dailyStockUsed.push(stockUsed);
   }
 
   const itemColumns = ['Item Category', 'Item Name'];
@@ -2567,8 +2675,9 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
       'Added', ...Array(addedCols.length - 1).fill(''),
       'Subtracted', ...Array(subtractedCols.length - 1).fill(''),
       'End of Day Total',
+      ...(showStockUsed ? [''] : []),
     );
-    columnHeaderRow.push(...addedCols, ...subtractedCols, 'End of Day Total');
+    columnHeaderRow.push(...addedCols, ...subtractedCols, 'End of Day Total', ...(showStockUsed ? ['Stock Used'] : []));
   }
 
   const lines = [];
@@ -2595,6 +2704,11 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
       row.push(String(subtractedTotal));
 
       row.push(String(endOfDayTotal));
+
+      if (showStockUsed) {
+        const stockUsed = dailyStockUsed[index].get(item);
+        row.push(stockUsed !== undefined ? String(stockUsed) : '');
+      }
     }
 
     lines.push(row.map(csvEscape).join(','));
@@ -2615,24 +2729,28 @@ async function buildCurrentMonthCsv(locationKey) {
 
   let activityRows = [];
   let snapshotRows = [];
+  let closingStockRows = [];
 
   if (dayCount > 1) {
     const monthStart = formatLogDate(new Date(year, month, 1));
     const yesterday = formatLogDate(new Date(year, month, dayCount - 1));
 
-    const [activityRes, snapshotRes] = await Promise.all([
+    const [activityRes, snapshotRes, closingStockRes] = await Promise.all([
       supabaseClient.from('daily_item_activity').select('item_name, activity_date, source, added, subtracted')
         .eq('location', locationKey).gte('activity_date', monthStart).lte('activity_date', yesterday),
       supabaseClient.from('daily_stock_snapshots').select('item_name, activity_date, qty')
         .eq('location', locationKey).gte('activity_date', monthStart).lte('activity_date', yesterday),
+      supabaseClient.from('daily_closing_stock').select('item_name, activity_date, stock_used')
+        .eq('location', locationKey).gte('activity_date', monthStart).lte('activity_date', yesterday),
     ]);
-    if (activityRes.error || snapshotRes.error) throw activityRes.error || snapshotRes.error;
+    if (activityRes.error || snapshotRes.error || closingStockRes.error) throw activityRes.error || snapshotRes.error || closingStockRes.error;
     activityRows = activityRes.data;
     snapshotRows = snapshotRes.data;
+    closingStockRows = closingStockRes.data;
   }
 
-  const liveData = { logs: locationLogs[locationKey], stocks: locationStocks[locationKey] };
-  return buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData);
+  const liveData = { logs: locationLogs[locationKey], stocks: locationStocks[locationKey], closingStockLocks: closingStockLocks[locationKey] };
+  return buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData, closingStockRows);
 }
 
 // Generates and stores last month's finished CSV sheet for any location that
@@ -2653,13 +2771,15 @@ async function ensurePreviousMonthSheets() {
   const monthStart = formatLogDate(prevMonthDate);
   const monthEnd = formatLogDate(new Date(prevMonthDate.getFullYear(), prevMonthDate.getMonth(), daysInPrevMonth));
 
-  const [activityRes, snapshotRes] = await Promise.all([
+  const [activityRes, snapshotRes, closingStockRes] = await Promise.all([
     supabaseClient.from('daily_item_activity').select('location, item_name, activity_date, source, added, subtracted')
       .gte('activity_date', monthStart).lte('activity_date', monthEnd),
     supabaseClient.from('daily_stock_snapshots').select('location, item_name, activity_date, qty')
       .gte('activity_date', monthStart).lte('activity_date', monthEnd),
+    supabaseClient.from('daily_closing_stock').select('location, item_name, activity_date, stock_used')
+      .gte('activity_date', monthStart).lte('activity_date', monthEnd),
   ]);
-  if (activityRes.error || snapshotRes.error) return false;
+  if (activityRes.error || snapshotRes.error || closingStockRes.error) return false;
 
   // No recorded activity/snapshots for that month at all — most likely this
   // feature was only just deployed and there's nothing real to show yet.
@@ -2674,6 +2794,7 @@ async function ensurePreviousMonthSheets() {
       activityRes.data.filter((r) => r.location === loc),
       snapshotRes.data.filter((r) => r.location === loc),
       null,
+      closingStockRes.data.filter((r) => r.location === loc),
     ),
   }));
 
