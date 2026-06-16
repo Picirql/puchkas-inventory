@@ -814,6 +814,10 @@ function escapeHtml(value) {
 
 // ===================== Users View =====================
 
+// Manager-only view: left card is the "Add User" form (username / email /
+// password / role), right card lists every existing profile fetched live
+// from `profiles`. Renders the shell immediately, then kicks off
+// refreshUsersList() to populate the right card asynchronously.
 function renderUsersView() {
   viewContent.innerHTML = `
     <div class="items-dashboard">
@@ -951,6 +955,10 @@ async function handleCreateUser(form, errorEl, successEl) {
 
 // ===================== Warehouse View =====================
 
+// Routes to the active Warehouse subtab renderer: General Inventory,
+// All Requests (cross-location), Kitchen, or a per-Shop requests panel.
+// Active subtab is tracked in `activeWarehouseSubtab` and toggled by the
+// subtab-bar click handler in Event Listeners.
 function renderWarehouseView() {
   warehouseSubtabButtons.forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.subtab === activeWarehouseSubtab);
@@ -1095,15 +1103,11 @@ function renderIncomingRequestsPanel(locationKey) {
   wireIncomingRequestActionListeners(warehouseSubtabContent);
 }
 
-// Consolidated view of every incoming request across all locations, so Warehouse
-// staff don't have to hop between per-location subtabs to action them. Includes
-// a "Dispatch All Possible" button that sweeps through every Pending request and
-// sends whatever it can — fully where stock allows, partially up to the max otherwise.
-// Groups Pending requests by item and keeps only the items where the combined
-// quantity requested across every location can be fully covered by the given
-// stock — used by "Dispatch All Possible" so it dispatches an item to
-// everyone who asked for it, or not at all, never leaving some requesters
-// short while others are fulfilled.
+// Groups pending requests by item and returns only those items whose total
+// requested quantity (summed across all locations) can be fully covered by
+// the given stock. Used by "Dispatch All Possible" so that an item is
+// either dispatched to everyone who asked for it, or left pending for all —
+// no one is short-changed while others are fulfilled.
 function getFullyDispatchableItemTotals(pendingRequests, stock) {
   const totalsByItem = new Map();
   pendingRequests.forEach((request) => {
@@ -1118,6 +1122,10 @@ function getFullyDispatchableItemTotals(pendingRequests, stock) {
   return dispatchable;
 }
 
+// Consolidated view of every incoming request across all locations, so
+// Warehouse staff don't have to hop between per-location subtabs to action
+// them. Includes a cross-location "Dispatch All Possible" button — see
+// handleDispatchAllRequests for the all-or-nothing dispatch logic.
 function renderAllRequestsSubtab() {
   const requests = sortRequestsByStatusThenTime(warehouseRequests);
   const pendingRequests = requests.filter((request) => request.status === 'Pending');
@@ -1891,6 +1899,9 @@ function formatLogTimestamp(timestamp) {
 
 // ===================== Location Views (Kitchen / Shop 1-3) =====================
 
+// Shared renderer for Kitchen and all Shop views. `viewKey` is the location
+// key (e.g. 'kitchen', 'shop1'). Builds a two-subtab layout (General
+// Inventory | Warehouse) and delegates to renderLocationSubtabContent.
 function renderLocationView(viewKey) {
   viewContent.innerHTML = `
     <div class="location-view">
@@ -1980,6 +1991,11 @@ function collectRequestQtyEntries(formCard) {
   return entries;
 }
 
+// Location-side "Warehouse" subtab: shows a multi-item request form (Submit
+// Request to Warehouse) and that location's own request history below it.
+// For Kitchen specifically, also appends buildIncomingWarehouseRequestsSectionHtml
+// so Kitchen staff can see and action the Warehouse's "Ask Kitchen" requests
+// in the same view — rather than needing a separate tab.
 function renderWarehouseRequestsPanel(container, locationKey) {
   const requests = sortRequestsByStatusThenTime(
     warehouseRequests.filter((request) => request.fromLocation === locationKey)
@@ -2103,6 +2119,9 @@ function buildIncomingKitchenRequestActionButtonsHtml(request) {
           </div>`;
 }
 
+// Builds the "Incoming Warehouse Requests" section shown at the bottom of
+// Kitchen's Warehouse subtab — the Dispatch/Partial/Reject action buttons
+// here are wired up by renderWarehouseRequestsPanel after injection.
 function buildIncomingWarehouseRequestsSectionHtml() {
   const requests = sortRequestsByStatusThenTime(kitchenRequests);
   const pendingRequests = requests.filter((request) => request.status === 'Pending');
@@ -2173,6 +2192,8 @@ function handleSubmitWarehouseRequestTable(formCard, locationKey) {
   renderView(currentViewKey);
 }
 
+// Marks a single Dispatched warehouse request as Received and adds the
+// received quantity to the requesting location's own stock.
 function handleMarkRequestReceived(requestId) {
   const request = warehouseRequests.find((entry) => entry.id === requestId);
   if (!request || request.status !== 'Dispatched') return;
@@ -2366,6 +2387,15 @@ function handleRejectKitchenRequest(requestId) {
 }
 
 // ===================== Stock Update Modal =====================
+//
+// NOTE: The single-item stock update modal (#stock-modal) is no longer
+// triggered anywhere in the app — the batch update table inside
+// renderInventoryDashboard replaced it. The modal-specific functions below
+// (openStockModal, closeStockModal, handleStockSave, renderStockItemSuggestions,
+// etc.) are kept in case they're needed again.
+// The catalog/utility helpers here (getCatalogItemNames, findCatalogItemByName,
+// roundToTwoDecimals, getCurrentUserRole, stockUpdateRequiresSource) are still
+// actively used by other sections.
 
 function getCatalogItemNames() {
   return [...itemsCatalog.raw, ...itemsCatalog.processed];
@@ -2841,6 +2871,8 @@ async function handleDownloadCurrentMonthSheet(locationKey) {
   }
 }
 
+// Formats today's active logs (not yet archived) as plain text — same
+// bracket-timestamp format as the archived daily logs, oldest first.
 function buildInventoryLogText() {
   const sortedLogs = [...locationLogs[activeInventoryLocation]].sort((a, b) => a.timestamp - b.timestamp);
 
@@ -2868,6 +2900,11 @@ function downloadTextFile(filename, content, mimeType) {
   URL.revokeObjectURL(url);
 }
 
+// "Update Stock" button handler for one category section. Reads all the
+// batch-input rows, validates them (conflict = both Add + Remove filled for
+// Warehouse; invalid = Remove exceeds current stock; locked = skip rows that
+// already have a closing-stock lock), and either opens the source-select modal
+// (for non-warehouse locations with stock additions) or applies immediately.
 function handleBatchUpdateClick(container, categoryKey, locationKey) {
   const section = container.querySelector(`[data-category="${categoryKey}"]`).closest('.inventory-column');
   const errorEl = section.querySelector('.batch-update-error');
@@ -3146,6 +3183,9 @@ loginForm.addEventListener('submit', async (event) => {
   }
 });
 
+// The same confirm dialog (#confirm-overlay) is reused by two flows —
+// "Update Closing Stock" (pendingClosingStockUpdate) and "Remove Item"
+// (pendingRemoval). Check which is active and dispatch to the right handler.
 confirmRemoveBtn.addEventListener('click', () => {
   if (pendingClosingStockUpdate) {
     applyClosingStockUpdate();
@@ -3259,6 +3299,9 @@ sidebarBackdrop.addEventListener('click', closeSidebarDrawer);
 
 // ===================== Init =====================
 
+// On every page load: check for an existing valid Supabase session (from a
+// previous login). If one exists, re-enter the app without requiring the
+// user to log in again. If not, the login screen stays visible.
 (async function init() {
   const { data: { session } } = await supabaseClient.auth.getSession();
   if (!session) return;
