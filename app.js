@@ -36,8 +36,8 @@ const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
 // every nav button not listed here for the signed-in role. Only 'manager'
 // gets the 'items' (catalog) and 'users' views.
 const ROLE_ACCESS = {
-  manager: [...ALL_VIEWS, 'users'],
-  warehouse: ['warehouse'],
+  manager: [...ALL_VIEWS, 'users', 'inventory-check'],
+  warehouse: ['warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'kitchen', 'inventory-check'],
   shop1: ['shop1'],
   shop2: ['shop2'],
   shop3: ['shop3'],
@@ -522,7 +522,10 @@ function applyRoleAccess(role) {
 function renderView(viewKey) {
   currentViewKey = viewKey;
 
-  viewTitle.textContent = viewKey === 'items' ? 'Items' : viewKey === 'users' ? 'Users' : (ROLE_LABELS[viewKey] || viewKey);
+  viewTitle.textContent = viewKey === 'items' ? 'Items'
+    : viewKey === 'users' ? 'Users'
+    : viewKey === 'inventory-check' ? 'Inventory Check'
+    : (ROLE_LABELS[viewKey] || viewKey);
 
   navButtons.forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.view === viewKey);
@@ -532,13 +535,15 @@ function renderView(viewKey) {
   viewContent.hidden = isWarehouse;
   warehouseView.hidden = !isWarehouse;
 
-  viewContent.classList.toggle('is-bare', viewKey === 'items' || viewKey === 'users');
+  viewContent.classList.toggle('is-bare', viewKey === 'items' || viewKey === 'users' || viewKey === 'inventory-check');
   viewContent.classList.toggle('is-wide', LOCATION_VIEWS.includes(viewKey));
 
   if (viewKey === 'items') {
     renderItemsView();
   } else if (viewKey === 'users') {
     renderUsersView();
+  } else if (viewKey === 'inventory-check') {
+    renderInventoryCheckView();
   } else if (isWarehouse) {
     renderWarehouseView();
   } else if (LOCATION_VIEWS.includes(viewKey)) {
@@ -950,6 +955,71 @@ async function handleCreateUser(form, errorEl, successEl) {
     refreshUsersList();
   } finally {
     submitBtn.disabled = false;
+  }
+}
+
+// ===================== Inventory Check View =====================
+
+// Manager-only cross-location stock overview: one row per item, one column
+// per location, so the manager can see every location's stock side-by-side
+// without switching tabs. Items are grouped Raw then Processed, both
+// alphabetically. The search input filters rows in real-time.
+function renderInventoryCheckView() {
+  const locations = [
+    { key: 'warehouse', label: 'Warehouse' },
+    { key: 'kitchen',   label: 'Kitchen'   },
+    { key: 'shop1',     label: 'Shop 1'    },
+    { key: 'shop2',     label: 'Shop 2'    },
+    { key: 'shop3',     label: 'Shop 3'    },
+    { key: 'shop4',     label: 'Shop 4'    },
+  ];
+
+  const allItems = [
+    ...itemsCatalog.raw.map((item) => ({ item, category: 'Raw' })),
+    ...itemsCatalog.processed.map((item) => ({ item, category: 'Processed' })),
+  ];
+
+  viewContent.innerHTML = `
+    <div class="inventory-check-view items-dashboard">
+      <section class="items-card inventory-check-card">
+        <div class="inventory-check-toolbar">
+          <h3 class="items-card-title">Stock by Location</h3>
+          <input type="text" class="warehouse-search-input inventory-check-search" placeholder="Search items..." autocomplete="off" />
+        </div>
+        ${allItems.length
+          ? `<div class="inventory-check-table-wrap">
+              <table class="inventory-table inventory-check-table">
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th class="inv-check-item-col">Item</th>
+                    ${locations.map((loc) => `<th>${escapeHtml(loc.label)}</th>`).join('')}
+                  </tr>
+                </thead>
+                <tbody>
+                  ${allItems.map(({ item, category }) => `
+                    <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                      <td class="inv-check-category">${escapeHtml(category)}</td>
+                      <td class="inventory-item-name">${escapeHtml(item)}</td>
+                      ${locations.map((loc) => `<td class="inv-check-qty">${locationStocks[loc.key][item] || 0}</td>`).join('')}
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>`
+          : `<p class="empty-list-msg">No items in the catalog yet.</p>`}
+      </section>
+    </div>
+  `;
+
+  const searchInput = viewContent.querySelector('.inventory-check-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', () => {
+      const query = searchInput.value.trim().toLowerCase();
+      viewContent.querySelectorAll('.inventory-row').forEach((row) => {
+        row.hidden = query.length > 0 && !row.dataset.item.toLowerCase().includes(query);
+      });
+    });
   }
 }
 
@@ -1646,10 +1716,13 @@ function confirmPartialKitchenDispatch() {
 // Shop 1-3) own General Inventory subtab — identical UI, but each instance
 // reads/writes only its own locationKey's slice of locationStocks/locationLogs
 // so stock numbers and history never mix between locations.
+// When the Warehouse role views another location (isReadOnly), the table
+// shows Item + Stock only — no inputs or action buttons.
 function renderInventoryDashboard(container, locationKey) {
   activeInventoryLocation = locationKey;
   const stock = locationStocks[locationKey];
   const isWarehouse = locationKey === 'warehouse';
+  const isReadOnly = getCurrentUserRole() === 'warehouse' && !isWarehouse;
   const closingLocks = closingStockLocks[locationKey];
 
   container.innerHTML = `
@@ -1668,19 +1741,27 @@ function renderInventoryDashboard(container, locationKey) {
             <h3 class="inventory-column-title">${category.label}</h3>
             ${itemsCatalog[category.key].length
               ? `<div class="inventory-table-wrap">
-                  <table class="inventory-table ${isWarehouse ? '' : 'inventory-table-closing'}">
+                  <table class="inventory-table ${(!isWarehouse && !isReadOnly) ? 'inventory-table-closing' : ''}">
                     <thead>
                       <tr>
                         <th>Item</th>
                         <th>Stock</th>
-                        <th>Add</th>
-                        ${isWarehouse
-                          ? `<th>Remove</th>`
-                          : `<th>Closing Stock</th><th>Stock Used</th>`}
+                        ${isReadOnly ? '' : isWarehouse
+                          ? `<th>Add</th><th>Remove</th>`
+                          : `<th>Add</th><th>Closing Stock</th><th>Stock Used</th>`}
                       </tr>
                     </thead>
                     <tbody>
                       ${itemsCatalog[category.key].map((item) => {
+                        if (isReadOnly) {
+                          return `
+                            <tr class="inventory-row" data-item="${escapeHtml(item)}">
+                              <td class="inventory-item-name">${escapeHtml(item)}</td>
+                              <td><span class="inventory-item-qty">${stock[item] || 0}</span></td>
+                            </tr>
+                          `;
+                        }
+
                         if (isWarehouse) {
                           return `
                             <tr class="inventory-row" data-item="${escapeHtml(item)}">
@@ -1711,7 +1792,7 @@ function renderInventoryDashboard(container, locationKey) {
                     </tbody>
                   </table>
                 </div>
-                <div class="batch-section-footer">
+                ${isReadOnly ? '' : `<div class="batch-section-footer">
                   <p class="batch-update-error stock-modal-error" hidden></p>
                   <div class="batch-section-footer-buttons">
                     <button type="button" class="update-stock-section-btn" data-category="${category.key}">
@@ -1723,7 +1804,7 @@ function renderInventoryDashboard(container, locationKey) {
                       </button>
                     `}
                   </div>
-                </div>`
+                </div>`}`
               : `<p class="empty-list-msg">No items in this category yet.</p>`}
           </section>
         `).join('')}
@@ -1759,13 +1840,15 @@ function renderInventoryDashboard(container, locationKey) {
 
   container.querySelector('.current-day-log-btn').addEventListener('click', handleExportLogs);
 
-  container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
-    btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
-  });
+  if (!isReadOnly) {
+    container.querySelectorAll('.update-stock-section-btn').forEach((btn) => {
+      btn.addEventListener('click', () => handleBatchUpdateClick(container, btn.dataset.category, locationKey));
+    });
 
-  container.querySelectorAll('.update-closing-stock-section-btn').forEach((btn) => {
-    btn.addEventListener('click', () => handleClosingStockUpdateClick(container, btn.dataset.category, locationKey));
-  });
+    container.querySelectorAll('.update-closing-stock-section-btn').forEach((btn) => {
+      btn.addEventListener('click', () => handleClosingStockUpdateClick(container, btn.dataset.category, locationKey));
+    });
+  }
 
   container.querySelectorAll('.archive-download-btn[data-archive-id]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1902,12 +1985,22 @@ function formatLogTimestamp(timestamp) {
 // Shared renderer for Kitchen and all Shop views. `viewKey` is the location
 // key (e.g. 'kitchen', 'shop1'). Builds a two-subtab layout (General
 // Inventory | Warehouse) and delegates to renderLocationSubtabContent.
+// When the Warehouse role views these locations they get a read-only
+// General Inventory only — the Warehouse subtab is hidden so they can't
+// submit requests on behalf of another location.
 function renderLocationView(viewKey) {
+  const isWarehouseRole = getCurrentUserRole() === 'warehouse';
+
+  // Warehouse role has no business in another location's Warehouse-requests tab.
+  if (isWarehouseRole && activeLocationSubtab === 'warehouse') {
+    activeLocationSubtab = 'general';
+  }
+
   viewContent.innerHTML = `
     <div class="location-view">
       <nav class="subtab-bar">
         <button class="warehouse-subtab-btn" data-subtab="general">General Inventory</button>
-        <button class="warehouse-subtab-btn" data-subtab="warehouse">Warehouse</button>
+        ${isWarehouseRole ? '' : `<button class="warehouse-subtab-btn" data-subtab="warehouse">Warehouse</button>`}
       </nav>
       <div id="location-subtab-content" class="location-subtab-content"></div>
     </div>

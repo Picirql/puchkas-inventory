@@ -867,6 +867,56 @@ button {
   background: rgba(239, 68, 68, 0.1) !important;
 }
 
+/* ----- Inventory Check view ----- */
+
+.inventory-check-card {
+  max-width: 1100px;
+}
+
+.inventory-check-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.inventory-check-toolbar .items-card-title {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.inventory-check-toolbar .warehouse-search-input {
+  width: 220px;
+  flex: 0 0 auto;
+}
+
+/* No height cap — show all items in one scrollable table */
+.inventory-check-table-wrap {
+  overflow-x: auto;
+}
+
+/* Center every column from "Warehouse" onward (columns 3+) */
+.inventory-check-table th:nth-child(n+3),
+.inventory-check-table td:nth-child(n+3) {
+  text-align: center;
+}
+
+.inv-check-category {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.inv-check-item-col {
+  min-width: 140px;
+}
+
+.inv-check-qty {
+  min-width: 80px;
+  font-variant-numeric: tabular-nums;
+}
+
 .inventory-item-name {
   font-size: 0.92rem;
   font-weight: 500;
