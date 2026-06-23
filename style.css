@@ -381,12 +381,14 @@ button {
 }
 
 /* ===================== Items Dashboard ===================== */
+/* Single column so each card (category card, user card, etc.) gets the full
+   page width — needed because item names can be long. */
 .items-dashboard {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: 1fr;
   gap: 1.5rem;
   width: 100%;
-  max-width: 960px;
+  max-width: 1100px;
 }
 
 .items-search-input {
@@ -634,12 +636,6 @@ button {
   transform: scale(0.96);
 }
 
-@media (max-width: 720px) {
-  .items-dashboard {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* ===================== Warehouse View ===================== */
 .warehouse-view[hidden] {
   display: none;
@@ -761,9 +757,12 @@ button {
 }
 
 /* ----- Inventory Columns ----- */
+/* Single column so each category (general inventory's Raw/Processed/
+   Non-Food, and the request forms' category tables) stacks full-width
+   instead of side-by-side — item names can be long. */
 .inventory-columns {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: 1fr;
   gap: 1.5rem;
   margin-bottom: 1.5rem;
 }
@@ -1355,10 +1354,6 @@ button {
   margin-bottom: 1rem;
 }
 
-.request-items-columns.single-category {
-  grid-template-columns: 1fr;
-}
-
 .request-form-card .stock-modal-error {
   margin-top: 0.75rem;
 }
@@ -1592,10 +1587,6 @@ button {
 
 /* ----- Mobile (<= 768px) ----- */
 @media (max-width: 768px) {
-  .inventory-columns {
-    grid-template-columns: 1fr;
-  }
-
   .requests-table-wrap {
     max-height: min(520px, 65vh);
   }

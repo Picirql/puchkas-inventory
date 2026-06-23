@@ -23,25 +23,29 @@ const ROLE_LABELS = {
   shop2: 'Shop 2',
   shop3: 'Shop 3',
   shop4: 'Shop 4',
+  shop5: 'Shop 5',
+  shop6: 'Shop 6',
   kitchen: 'Kitchen',
 };
 
 // Every nav view in the app, and the subset of those views that are a
 // single location's own inventory (each gets a "General Inventory" +
 // "Warehouse" subtab pair via renderLocationView).
-const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'kitchen'];
-const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
+const ALL_VIEWS = ['items', 'warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'shop5', 'shop6', 'kitchen'];
+const LOCATION_VIEWS = ['kitchen', 'shop1', 'shop2', 'shop3', 'shop4', 'shop5', 'shop6'];
 
 // Which nav views each role is allowed to see — applyRoleAccess() hides
 // every nav button not listed here for the signed-in role. Only 'manager'
 // gets the 'items' (catalog) and 'users' views.
 const ROLE_ACCESS = {
   manager: [...ALL_VIEWS, 'users', 'inventory-check'],
-  warehouse: ['warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'kitchen', 'inventory-check'],
+  warehouse: ['warehouse', 'shop1', 'shop2', 'shop3', 'shop4', 'shop5', 'shop6', 'kitchen', 'inventory-check'],
   shop1: ['shop1'],
   shop2: ['shop2'],
   shop3: ['shop3'],
   shop4: ['shop4'],
+  shop5: ['shop5'],
+  shop6: ['shop6'],
   kitchen: ['kitchen'],
 };
 
@@ -79,10 +83,10 @@ let pendingLoginProfile = null; // profile to retry entering after a failed init
 // All five of these are populated from Supabase by loadAllDataFromSupabase()
 // once the user logs in — see "Supabase Sync" below. They start out empty so
 // the app has a valid shape to render before that fetch resolves.
-let itemsCatalog = { raw: [], processed: [] };
+let itemsCatalog = { raw: [], processed: [], 'non-food': [] };
 
 // Which subtab is active within the Warehouse nav view ('general',
-// 'requests', 'kitchen', 'shop1'..'shop4' — see renderWarehouseView) and
+// 'requests', 'kitchen', 'shop1'..'shop6' — see renderWarehouseView) and
 // within a single location's nav view ('general' or 'warehouse' — see
 // renderLocationView).
 let activeWarehouseSubtab = 'general';
@@ -99,7 +103,7 @@ let locationStocks = buildDefaultLocationStocks();
 let locationLogs = buildDefaultLocationLogs();
 
 // Per-location map of items whose Closing Stock has already been recorded
-// today — for Shop 1-4 and Kitchen General Inventory. Presence of an item
+// today — for Shop 1-6 and Kitchen General Inventory. Presence of an item
 // key means its Add/Closing Stock inputs are locked ('-') until the daily
 // reset; the value is the computed "Stock Used" to display, or null when
 // the item was locked via "Update Stock" (Closing Stock input ignored).
@@ -221,6 +225,8 @@ function buildDefaultLocationStocks() {
     shop2: {},
     shop3: {},
     shop4: {},
+    shop5: {},
+    shop6: {},
   };
 }
 
@@ -232,6 +238,8 @@ function buildDefaultLocationLogs() {
     shop2: [],
     shop3: [],
     shop4: [],
+    shop5: [],
+    shop6: [],
   };
 }
 
@@ -275,7 +283,7 @@ async function loadAllDataFromSupabase() {
   const error = itemsRes.error || stocksRes.error || logsRes.error || warehouseReqRes.error || kitchenReqRes.error || archivesRes.error || sheetsRes.error || closingLocksRes.error;
   if (error) throw error;
 
-  const catalog = { raw: [], processed: [] };
+  const catalog = { raw: [], processed: [], 'non-food': [] };
   itemsRes.data.forEach((row) => {
     if (catalog[row.category]) catalog[row.category].push(row.name);
   });
@@ -559,7 +567,13 @@ function renderView(viewKey) {
 const ITEM_CATEGORIES = [
   { key: 'raw', label: 'Raw Items' },
   { key: 'processed', label: 'Processed Items' },
+  { key: 'non-food', label: 'Non-Food Items' },
 ];
+
+// Categories Warehouse is allowed to request from Kitchen via "Ask Kitchen
+// for Items" — Raw Items are excluded since Kitchen only stocks/produces
+// Processed and Non-Food items, not raw ingredients.
+const KITCHEN_REQUESTABLE_CATEGORIES = ITEM_CATEGORIES.filter((category) => category.key !== 'raw');
 
 const STOCK_SOURCE_LABELS = {
   online: 'Online',
@@ -573,6 +587,8 @@ const WAREHOUSE_SUBTAB_LABELS = {
   shop2: 'Shop 2',
   shop3: 'Shop 3',
   shop4: 'Shop 4',
+  shop5: 'Shop 5',
+  shop6: 'Shop 6',
 };
 
 // "General Inventory" is the warehouse's own stock, so it maps to the
@@ -585,6 +601,8 @@ const WAREHOUSE_SUBTAB_LOCATIONS = {
   shop2: 'shop2',
   shop3: 'shop3',
   shop4: 'shop4',
+  shop5: 'shop5',
+  shop6: 'shop6',
 };
 
 function getActiveLocationKey() {
@@ -962,8 +980,8 @@ async function handleCreateUser(form, errorEl, successEl) {
 
 // Manager-only cross-location stock overview: one row per item, one column
 // per location, so the manager can see every location's stock side-by-side
-// without switching tabs. Items are grouped Raw then Processed, both
-// alphabetically. The search input filters rows in real-time.
+// without switching tabs. Items are grouped by ITEM_CATEGORIES order, each
+// group alphabetical. The search input filters rows in real-time.
 function renderInventoryCheckView() {
   const locations = [
     { key: 'warehouse', label: 'Warehouse' },
@@ -972,12 +990,13 @@ function renderInventoryCheckView() {
     { key: 'shop2',     label: 'Shop 2'    },
     { key: 'shop3',     label: 'Shop 3'    },
     { key: 'shop4',     label: 'Shop 4'    },
+    { key: 'shop5',     label: 'Shop 5'    },
+    { key: 'shop6',     label: 'Shop 6'    },
   ];
 
-  const allItems = [
-    ...itemsCatalog.raw.map((item) => ({ item, category: 'Raw' })),
-    ...itemsCatalog.processed.map((item) => ({ item, category: 'Processed' })),
-  ];
+  const allItems = ITEM_CATEGORIES.flatMap((category) =>
+    itemsCatalog[category.key].map((item) => ({ item, category: category.label }))
+  );
 
   viewContent.innerHTML = `
     <div class="inventory-check-view items-dashboard">
@@ -1042,7 +1061,7 @@ function renderWarehouseView() {
     // Kitchen subtab additionally lets the Warehouse ask Kitchen for processed items.
     renderKitchenSubtabContent();
   } else {
-    // Shop 1-3 subtabs: review and action requests sent by that location.
+    // Shop 1-6 subtabs: review and action requests sent by that location.
     renderIncomingRequestsPanel(activeWarehouseSubtab);
   }
 }
@@ -1387,7 +1406,8 @@ function handleDispatchAllKitchenRequests() {
 }
 
 // Kitchen subtab shows the usual "Requests from Kitchen" panel, plus a form
-// letting Warehouse staff ask Kitchen to make processed items, plus a history
+// letting Warehouse staff ask Kitchen for Processed and Non-Food items (not
+// Raw Items — Kitchen only makes/stocks those two categories), plus a history
 // of those outgoing requests.
 function renderKitchenSubtabContent() {
   const outgoingRequests = sortRequestsByStatusThenTime(kitchenRequests);
@@ -1398,9 +1418,9 @@ function renderKitchenSubtabContent() {
       ${buildIncomingRequestsSectionHtml('kitchen')}
 
       <section class="request-form-card">
-        <h3 class="request-form-title">Ask Kitchen for Processed Items</h3>
+        <h3 class="request-form-title">Ask Kitchen for Items</h3>
         <input type="text" class="warehouse-search-input request-items-search" placeholder="Search items..." autocomplete="off" />
-        ${buildRequestQtyTableHtml(locationStocks.kitchen, [{ key: 'processed', label: 'Processed Items' }])}
+        ${buildRequestQtyTableHtml(locationStocks.kitchen, KITCHEN_REQUESTABLE_CATEGORIES)}
         <p id="kitchen-request-form-error" class="stock-modal-error" hidden></p>
         <button type="button" class="request-send-all-btn submit-kitchen-request-btn">Request Items</button>
       </section>
@@ -2036,10 +2056,8 @@ function renderLocationSubtabContent(viewKey) {
 // requesting location's own stock (shown for context while deciding how much
 // to ask for).
 function buildRequestQtyTableHtml(stock, categories) {
-  const singleCategory = categories.length === 1 ? ' single-category' : '';
-
   return `
-    <div class="inventory-columns request-items-columns${singleCategory}">
+    <div class="inventory-columns request-items-columns">
       ${categories.map((category) => `
         <section class="inventory-column">
           <h3 class="inventory-column-title">${category.label}</h3>
@@ -2414,8 +2432,8 @@ function handleMarkAllKitchenRequestsReceived() {
   rerenderPreservingScroll();
 }
 
-// Reads the "Request Qty" table inside the Ask Kitchen for Processed Items
-// card and queues a Pending request for every item with a quantity entered.
+// Reads the "Request Qty" table inside the Ask Kitchen for Items card and
+// queues a Pending request for every item with a quantity entered.
 function handleSubmitKitchenRequestTable(formCard) {
   const errorEl = formCard.querySelector('#kitchen-request-form-error');
   const entries = collectRequestQtyEntries(formCard);
@@ -2491,7 +2509,7 @@ function handleRejectKitchenRequest(requestId) {
 // actively used by other sections.
 
 function getCatalogItemNames() {
-  return [...itemsCatalog.raw, ...itemsCatalog.processed];
+  return ITEM_CATEGORIES.flatMap((category) => itemsCatalog[category.key]);
 }
 
 function findCatalogItemByName(name) {
@@ -2623,9 +2641,8 @@ function csvEscape(value) {
 }
 
 function getItemCategoryLabel(itemName) {
-  if (itemsCatalog.raw.includes(itemName)) return 'Raw Items';
-  if (itemsCatalog.processed.includes(itemName)) return 'Processed Items';
-  return 'Uncategorized';
+  const category = ITEM_CATEGORIES.find((cat) => itemsCatalog[cat.key].includes(itemName));
+  return category ? category.label : 'Uncategorized';
 }
 
 const MONTH_NAMES = [
@@ -2692,7 +2709,7 @@ function classifyLogEntry(log, locationKey) {
 //
 // `closingStockRows` are rows from daily_closing_stock (see
 // supabase-stock-used-csv.sql), used to fill the "Stock Used" column for any
-// day before today. Shop 1-4 / Kitchen only — Warehouse has no Closing Stock
+// day before today. Shop 1-6 / Kitchen only — Warehouse has no Closing Stock
 // concept and gets no "Stock Used" column.
 function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData, closingStockRows) {
   const allItems = [...getCatalogItemNames()].sort((a, b) => a.localeCompare(b));
@@ -2702,7 +2719,7 @@ function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snaps
   // Warehouse sees its own updates plus transfers to/from each other location.
   // Kitchen and shops see own updates plus transfers to/from warehouse.
   const sourceCols = locationKey === 'warehouse'
-    ? ['own', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4']
+    ? ['own', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4', 'shop5', 'shop6']
     : ['own', 'warehouse'];
 
   const sourceColLabels = sourceCols.map((src) => {
@@ -2886,7 +2903,7 @@ async function ensurePreviousMonthSheets() {
   const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   const prevMonthKey = formatLogDate(prevMonthDate);
 
-  const locations = ['warehouse', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4'];
+  const locations = ['warehouse', 'kitchen', 'shop1', 'shop2', 'shop3', 'shop4', 'shop5', 'shop6'];
   const missing = locations.filter((loc) => !(inventorySheets[loc] || []).some((s) => s.sheetMonth === prevMonthKey));
   if (!missing.length) return false;
 
