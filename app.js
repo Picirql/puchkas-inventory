@@ -66,6 +66,11 @@ let pendingRemoval = null;
 // { category, index, oldName }. See handleEditItem/handleEditItemSave.
 let pendingEdit = null;
 
+// Catalog item currently having its hidden tag edited via the Edit Item
+// Tag modal: { category, index, itemName }. See handleEditItemTag/
+// handleEditItemTagSave.
+let pendingTagEdit = null;
+
 // Set while the "Not Enough Stock to Dispatch" modal is open, recording
 // which request/flow it belongs to: { source: 'warehouse' | 'kitchen',
 // requestId, requestedQty }. See openPartialDispatchModal(WithInfo) and
@@ -84,6 +89,12 @@ let pendingLoginProfile = null; // profile to retry entering after a failed init
 // once the user logs in — see "Supabase Sync" below. They start out empty so
 // the app has a valid shape to render before that fetch resolves.
 let itemsCatalog = { raw: [], processed: [], 'non-food': [] };
+
+// Optional hidden sub-category tag per item name (e.g. 'Chaats'), keyed by
+// item name — see supabase-item-tags.sql and itemMatchesSearch(). The tag
+// is never rendered alongside the item name; it only affects search
+// matching (typing "(Chaats)" surfaces every item tagged 'Chaats').
+let itemTags = {};
 
 // Which subtab is active within the Warehouse nav view ('general',
 // 'requests', 'kitchen', 'shop1'..'shop6' — see renderWarehouseView) and
@@ -185,6 +196,12 @@ const editItemError = document.getElementById('edit-item-error');
 const editItemSaveBtn = document.getElementById('edit-item-save-btn');
 const editItemCancelBtn = document.getElementById('edit-item-cancel-btn');
 
+const editItemTagModal = document.getElementById('edit-item-tag-modal');
+const editItemTagInput = document.getElementById('edit-item-tag-input');
+const editItemTagError = document.getElementById('edit-item-tag-error');
+const editItemTagSaveBtn = document.getElementById('edit-item-tag-save-btn');
+const editItemTagCancelBtn = document.getElementById('edit-item-tag-cancel-btn');
+
 const partialDispatchModal = document.getElementById('partial-dispatch-modal');
 const partialDispatchInfo = document.getElementById('partial-dispatch-info');
 const partialDispatchQtyInput = document.getElementById('partial-dispatch-qty-input');
@@ -270,7 +287,7 @@ function showSyncError(message) {
 // so nothing else needs to change.
 async function loadAllDataFromSupabase() {
   const [itemsRes, stocksRes, logsRes, warehouseReqRes, kitchenReqRes, archivesRes, sheetsRes, closingLocksRes] = await Promise.all([
-    supabaseClient.from('items').select('category, name'),
+    supabaseClient.from('items').select('category, name, tag'),
     supabaseClient.from('stocks').select('location, item_name, qty'),
     supabaseClient.from('logs').select('*'),
     supabaseClient.from('warehouse_requests').select('*'),
@@ -284,10 +301,13 @@ async function loadAllDataFromSupabase() {
   if (error) throw error;
 
   const catalog = { raw: [], processed: [], 'non-food': [] };
+  const tags = {};
   itemsRes.data.forEach((row) => {
     if (catalog[row.category]) catalog[row.category].push(row.name);
+    if (row.tag) tags[row.name] = row.tag;
   });
   itemsCatalog = catalog;
+  itemTags = tags;
 
   const stocks = buildDefaultLocationStocks();
   stocksRes.data.forEach((row) => {
@@ -449,6 +469,11 @@ async function deleteCatalogItem(category, name) {
   if (error) showSyncError('Could not remove item — check your connection.');
 }
 
+async function updateCatalogItemTag(category, name, tag) {
+  const { error } = await supabaseClient.from('items').update({ tag: tag || null }).eq('category', category).eq('name', name);
+  if (error) showSyncError('Could not save item tag — check your connection.');
+}
+
 // Renaming a catalog item cascades across stocks, logs, and both request
 // queues (see renameItemEverywhere). mergedStocks carries the post-merge
 // quantity for every location that had stock under oldName, so those rows
@@ -575,6 +600,18 @@ const ITEM_CATEGORIES = [
 // Processed and Non-Food items, not raw ingredients.
 const KITCHEN_REQUESTABLE_CATEGORIES = ITEM_CATEGORIES.filter((category) => category.key !== 'raw');
 
+// Shared search predicate for every item search box in the app. Beyond a
+// plain substring match on the item's name, it also matches against the
+// item's hidden tag (see itemTags) wrapped in parens — so typing
+// "(Chaats)" surfaces every item tagged 'Chaats' without that word ever
+// appearing as part of the item's displayed name.
+function itemMatchesSearch(itemName, query) {
+  if (!query) return true;
+  if (itemName.toLowerCase().includes(query)) return true;
+  const tag = itemTags[itemName];
+  return !!tag && `(${tag.toLowerCase()})`.includes(query);
+}
+
 const STOCK_SOURCE_LABELS = {
   online: 'Online',
   supermarket: 'Supermarket',
@@ -634,6 +671,8 @@ function renderItemsView() {
                     <li class="item-row">
                       <span class="item-index">${index + 1}</span>
                       <span class="item-name">${escapeHtml(item)}</span>
+                      ${itemTags[item] ? `<span class="item-tag-badge" title="Hidden search tag">${escapeHtml(itemTags[item])}</span>` : ''}
+                      <button type="button" class="item-tag-btn" data-category="${category.key}" data-index="${index}">Tag</button>
                       <button type="button" class="item-edit-btn" data-category="${category.key}" data-index="${index}">Edit</button>
                       <button type="button" class="item-remove-btn" data-category="${category.key}" data-index="${index}">Remove</button>
                     </li>
@@ -650,6 +689,12 @@ function renderItemsView() {
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       handleAddItem(form);
+    });
+  });
+
+  viewContent.querySelectorAll('.item-tag-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      handleEditItemTag(btn.dataset.category, Number(btn.dataset.index));
     });
   });
 
@@ -677,8 +722,8 @@ function filterCategoryRows(searchInput) {
   const card = searchInput.closest('.items-card');
 
   card.querySelectorAll('.item-row').forEach((row) => {
-    const name = row.querySelector('.item-name').textContent.toLowerCase();
-    row.hidden = query.length > 0 && !name.includes(query);
+    const name = row.querySelector('.item-name').textContent;
+    row.hidden = !itemMatchesSearch(name, query);
   });
 }
 
@@ -762,6 +807,58 @@ function handleEditItemSave() {
   renderView('items');
 }
 
+// Edit-item-tag flow: opens the "Edit Item Tag" modal pre-filled with the
+// item's current hidden tag (if any). The tag is purely a search aid (see
+// itemMatchesSearch) — it's never shown next to the item name anywhere
+// outside this modal and the small badge in the Items view's own list.
+function handleEditItemTag(category, index) {
+  const itemName = itemsCatalog[category][index];
+  if (itemName === undefined) return;
+
+  pendingTagEdit = { category, index, itemName };
+  editItemTagInput.value = itemTags[itemName] || '';
+  hideEditItemTagError();
+  editItemTagModal.hidden = false;
+  editItemTagInput.focus();
+  editItemTagInput.select();
+}
+
+function closeEditItemTagModal() {
+  editItemTagModal.hidden = true;
+  pendingTagEdit = null;
+}
+
+function showEditItemTagError(message) {
+  editItemTagError.textContent = message;
+  editItemTagError.hidden = false;
+}
+
+function hideEditItemTagError() {
+  editItemTagError.hidden = true;
+  editItemTagError.textContent = '';
+}
+
+function handleEditItemTagSave() {
+  if (!pendingTagEdit) return;
+
+  const { category, itemName } = pendingTagEdit;
+  const tag = editItemTagInput.value.trim();
+
+  hideEditItemTagError();
+
+  if (tag.includes('(') || tag.includes(')')) {
+    showEditItemTagError('Tag should not include parentheses — they\'re added automatically when searching.');
+    return;
+  }
+
+  if (tag) itemTags[itemName] = tag;
+  else delete itemTags[itemName];
+
+  updateCatalogItemTag(category, itemName, tag);
+  closeEditItemTagModal();
+  renderView('items');
+}
+
 // Item names are stored as plain strings throughout locationStocks, locationLogs,
 // and both request queues — renaming a catalog entry must cascade everywhere so
 // existing stock and history don't get silently orphaned under the old name.
@@ -788,6 +885,11 @@ function renameItemEverywhere(category, oldName, newName) {
   kitchenRequests.forEach((request) => {
     if (request.item === oldName) request.item = newName;
   });
+
+  if (Object.prototype.hasOwnProperty.call(itemTags, oldName)) {
+    itemTags[newName] = itemTags[oldName];
+    delete itemTags[oldName];
+  }
 
   renameCatalogItemEverywhere(category, oldName, newName, mergedStocks);
 }
@@ -821,6 +923,7 @@ function confirmRemoval() {
   const { category, index } = pendingRemoval;
   const itemName = itemsCatalog[category][index];
   itemsCatalog[category].splice(index, 1);
+  delete itemTags[itemName];
   deleteCatalogItem(category, itemName);
   closeConfirmDialog();
   renderView('items');
@@ -1036,7 +1139,7 @@ function renderInventoryCheckView() {
     searchInput.addEventListener('input', () => {
       const query = searchInput.value.trim().toLowerCase();
       viewContent.querySelectorAll('.inventory-row').forEach((row) => {
-        row.hidden = query.length > 0 && !row.dataset.item.toLowerCase().includes(query);
+        row.hidden = !itemMatchesSearch(row.dataset.item, query);
       });
     });
   }
@@ -1946,8 +2049,8 @@ function renderInventorySheetsHtml(locationKey) {
 function filterInventoryRows(container, searchInput) {
   const query = searchInput.value.trim().toLowerCase();
   container.querySelectorAll('.inventory-row').forEach((row) => {
-    const name = row.querySelector('.inventory-item-name').textContent.toLowerCase();
-    row.hidden = query.length > 0 && !name.includes(query);
+    const name = row.querySelector('.inventory-item-name').textContent;
+    row.hidden = !itemMatchesSearch(name, query);
   });
 }
 
@@ -3317,6 +3420,18 @@ editItemInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
     handleEditItemSave();
+  }
+});
+
+editItemTagSaveBtn.addEventListener('click', handleEditItemTagSave);
+editItemTagCancelBtn.addEventListener('click', closeEditItemTagModal);
+
+editItemTagInput.addEventListener('input', hideEditItemTagError);
+
+editItemTagInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    handleEditItemTagSave();
   }
 });
 

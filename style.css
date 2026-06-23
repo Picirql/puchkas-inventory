@@ -546,6 +546,21 @@ button {
   color: var(--text-muted);
 }
 
+/* Hidden search tag (see itemTags) shown only here, as a small badge in
+   the manager's own catalog list — never alongside the item name anywhere
+   else in the app. */
+.item-tag-badge {
+  flex-shrink: 0;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  color: #d8b4fe;
+}
+
+.item-tag-btn,
 .item-edit-btn,
 .item-remove-btn {
   padding: 0.4rem 0.85rem;
@@ -553,6 +568,20 @@ button {
   font-size: 0.78rem;
   font-weight: 600;
   transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.item-tag-btn {
+  background: rgba(168, 85, 247, 0.1);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  color: #d8b4fe;
+}
+
+.item-tag-btn:hover {
+  background: rgba(168, 85, 247, 0.22);
+}
+
+.item-tag-btn:active {
+  transform: scale(0.95);
 }
 
 .item-edit-btn {

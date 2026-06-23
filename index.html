@@ -190,6 +190,26 @@
     </div>
   </div>
 
+  <!-- Edit Item Tag Modal -->
+  <div id="edit-item-tag-modal" class="pin-overlay" hidden>
+    <div class="pin-modal stock-modal">
+      <h3 class="stock-modal-title">Edit Item Tag</h3>
+      <p class="partial-dispatch-info">Optional hidden sub-category (e.g. "Chaats") — never shown with the item name, but typing "(Chaats)" in any item search will match every item with that tag.</p>
+
+      <div class="stock-field">
+        <label for="edit-item-tag-input" class="stock-field-label">Tag</label>
+        <input type="text" id="edit-item-tag-input" class="stock-item-search" placeholder="e.g. Chaats (leave blank to remove)" autocomplete="off" />
+      </div>
+
+      <p id="edit-item-tag-error" class="stock-modal-error" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="edit-item-tag-cancel-btn" class="pin-cancel-btn">Cancel</button>
+        <button id="edit-item-tag-save-btn" class="stock-save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Partial Dispatch Modal -->
   <div id="partial-dispatch-modal" class="pin-overlay" hidden>
     <div class="pin-modal stock-modal">
