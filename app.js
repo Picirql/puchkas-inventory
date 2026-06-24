@@ -600,6 +600,17 @@ const ITEM_CATEGORIES = [
 // Processed and Non-Food items, not raw ingredients.
 const KITCHEN_REQUESTABLE_CATEGORIES = ITEM_CATEGORIES.filter((category) => category.key !== 'raw');
 
+// Row order for every item-list export (monthly CSV sheets) — Processed,
+// then Raw, then Non-Food, with each category's items kept in the same
+// order they're stored/shown in on the website (see itemsCatalog). This is
+// a different order from ITEM_CATEGORIES (which drives on-screen card/
+// column order) so changing one doesn't silently change the other.
+const EXPORT_CATEGORY_ORDER = ['processed', 'raw', 'non-food'];
+
+function getCatalogItemNamesForExport() {
+  return EXPORT_CATEGORY_ORDER.flatMap((key) => itemsCatalog[key]);
+}
+
 // Shared search predicate for every item search box in the app. Beyond a
 // plain substring match on the item's name, it also matches against the
 // item's hidden tag (see itemTags) wrapped in parens — so typing
@@ -2859,7 +2870,7 @@ function classifyLogEntry(log, locationKey) {
 // day before today. Shop 1-6 / Kitchen only — Warehouse has no Closing Stock
 // concept and gets no "Stock Used" column.
 function buildMonthlyCsv(locationKey, year, month, dayCount, activityRows, snapshotRows, liveData, closingStockRows) {
-  const allItems = [...getCatalogItemNames()].sort((a, b) => a.localeCompare(b));
+  const allItems = getCatalogItemNamesForExport();
   const showStockUsed = locationKey !== 'warehouse';
 
   // Source breakdown columns differ by location type.
