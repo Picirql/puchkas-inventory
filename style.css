@@ -759,6 +759,42 @@ button {
   background: rgba(148, 163, 184, 0.12);
 }
 
+/* Quick-filter buttons below an item search box — one per hidden tag (see
+   itemTags / wireTagFilterButtons). Clicking fills the search box with
+   "(Tag)" instead of the user having to type it. */
+.tag-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+
+.tag-filter-btn {
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  background: rgba(168, 85, 247, 0.1);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  color: #d8b4fe;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.tag-filter-btn:hover {
+  background: rgba(168, 85, 247, 0.22);
+}
+
+.tag-filter-btn:active {
+  transform: scale(0.95);
+}
+
+.tag-filter-btn.active {
+  background: rgba(168, 85, 247, 0.4);
+  border-color: rgba(168, 85, 247, 0.6);
+  color: #f3e8ff;
+}
+
 .warehouse-toolbar-actions {
   display: flex;
   flex-wrap: wrap;

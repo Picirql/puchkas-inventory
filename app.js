@@ -612,6 +612,40 @@ function itemMatchesSearch(itemName, query) {
   return !!tag && `(${tag.toLowerCase()})`.includes(query);
 }
 
+// Every distinct tag currently in use, alphabetical — drives the row of
+// quick-filter buttons rendered below every item search box.
+function getAllTags() {
+  return Array.from(new Set(Object.values(itemTags))).sort((a, b) => a.localeCompare(b));
+}
+
+// One quick-filter button per tag; renders nothing if no items are tagged
+// yet. Pair with wireTagFilterButtons() on the same scope/search input.
+function buildTagFilterButtonsHtml() {
+  const tags = getAllTags();
+  if (!tags.length) return '';
+
+  return `
+    <div class="tag-filter-bar">
+      ${tags.map((tag) => `<button type="button" class="tag-filter-btn" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('')}
+    </div>
+  `;
+}
+
+// Clicking a tag button fills `searchInput` with "(Tag)" and fires its
+// existing 'input' listener (whatever that view's own filter logic is) —
+// clicking the already-active tag again clears the search instead.
+function wireTagFilterButtons(scope, searchInput) {
+  scope.querySelectorAll('.tag-filter-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const isActive = btn.classList.contains('active');
+      scope.querySelectorAll('.tag-filter-btn').forEach((b) => b.classList.remove('active'));
+      searchInput.value = isActive ? '' : `(${btn.dataset.tag})`;
+      if (!isActive) btn.classList.add('active');
+      searchInput.dispatchEvent(new Event('input'));
+    });
+  });
+}
+
 const STOCK_SOURCE_LABELS = {
   online: 'Online',
   supermarket: 'Supermarket',
@@ -658,6 +692,7 @@ function renderItemsView() {
           <h3 class="items-card-title">${category.label}</h3>
 
           <input type="text" class="items-search-input" placeholder="Search ${category.label.toLowerCase()}..." data-category="${category.key}" autocomplete="off" />
+          ${buildTagFilterButtonsHtml()}
 
           <form class="add-item-form" data-category="${category.key}">
             <input type="text" class="add-item-input" placeholder="New item name" autocomplete="off" />
@@ -714,6 +749,7 @@ function renderItemsView() {
     input.addEventListener('input', () => {
       filterCategoryRows(input);
     });
+    wireTagFilterButtons(input.closest('.items-card'), input);
   });
 }
 
@@ -1108,6 +1144,7 @@ function renderInventoryCheckView() {
           <h3 class="items-card-title">Stock by Location</h3>
           <input type="text" class="warehouse-search-input inventory-check-search" placeholder="Search items..." autocomplete="off" />
         </div>
+        ${buildTagFilterButtonsHtml()}
         ${allItems.length
           ? `<div class="inventory-check-table-wrap">
               <table class="inventory-table inventory-check-table">
@@ -1142,6 +1179,7 @@ function renderInventoryCheckView() {
         row.hidden = !itemMatchesSearch(row.dataset.item, query);
       });
     });
+    wireTagFilterButtons(viewContent, searchInput);
   }
 }
 
@@ -1523,6 +1561,7 @@ function renderKitchenSubtabContent() {
       <section class="request-form-card">
         <h3 class="request-form-title">Ask Kitchen for Items</h3>
         <input type="text" class="warehouse-search-input request-items-search" placeholder="Search items..." autocomplete="off" />
+        ${buildTagFilterButtonsHtml()}
         ${buildRequestQtyTableHtml(locationStocks.kitchen, KITCHEN_REQUESTABLE_CATEGORIES)}
         <p id="kitchen-request-form-error" class="stock-modal-error" hidden></p>
         <button type="button" class="request-send-all-btn submit-kitchen-request-btn">Request Items</button>
@@ -1570,6 +1609,7 @@ function renderKitchenSubtabContent() {
   const kitchenRequestFormCard = warehouseSubtabContent.querySelector('.request-form-card');
   const kitchenRequestSearchInput = kitchenRequestFormCard.querySelector('.request-items-search');
   kitchenRequestSearchInput.addEventListener('input', () => filterInventoryRows(kitchenRequestFormCard, kitchenRequestSearchInput));
+  wireTagFilterButtons(kitchenRequestFormCard, kitchenRequestSearchInput);
 
   kitchenRequestFormCard.querySelector('.submit-kitchen-request-btn').addEventListener('click', () => {
     handleSubmitKitchenRequestTable(kitchenRequestFormCard);
@@ -1857,6 +1897,7 @@ function renderInventoryDashboard(container, locationKey) {
           <button type="button" class="warehouse-toolbar-btn" data-inventory-action="export-logs">Export Logs (TXT)</button>
         </div>
       </div>
+      ${buildTagFilterButtonsHtml()}
 
       <div class="inventory-columns">
         ${ITEM_CATEGORIES.map((category) => `
@@ -1952,6 +1993,7 @@ function renderInventoryDashboard(container, locationKey) {
 
   const searchInput = container.querySelector('.warehouse-search-input');
   searchInput.addEventListener('input', () => filterInventoryRows(container, searchInput));
+  wireTagFilterButtons(container, searchInput);
 
   container.querySelector('[data-inventory-action="export-csv"]').addEventListener('click', () => {
     container.querySelector('#monthly-inventory-sheets-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2222,6 +2264,7 @@ function renderWarehouseRequestsPanel(container, locationKey) {
       <section class="request-form-card">
         <h3 class="request-form-title">Submit Request to Warehouse</h3>
         <input type="text" class="warehouse-search-input request-items-search" placeholder="Search items..." autocomplete="off" />
+        ${buildTagFilterButtonsHtml()}
         ${buildRequestQtyTableHtml(locationStocks[locationKey], ITEM_CATEGORIES)}
         <p id="warehouse-request-form-error" class="stock-modal-error" hidden></p>
         <button type="button" class="request-send-all-btn submit-warehouse-request-btn">Request Items</button>
@@ -2269,6 +2312,7 @@ function renderWarehouseRequestsPanel(container, locationKey) {
   const requestFormCard = container.querySelector('.request-form-card');
   const requestSearchInput = requestFormCard.querySelector('.request-items-search');
   requestSearchInput.addEventListener('input', () => filterInventoryRows(requestFormCard, requestSearchInput));
+  wireTagFilterButtons(requestFormCard, requestSearchInput);
 
   requestFormCard.querySelector('.submit-warehouse-request-btn').addEventListener('click', () => {
     handleSubmitWarehouseRequestTable(requestFormCard, locationKey);
